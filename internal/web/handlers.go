@@ -1,0 +1,386 @@
+package web
+
+import (
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+
+	"github.com/xdpban/xdp-ban/internal/approval"
+	"github.com/xdpban/xdp-ban/internal/model"
+	"github.com/xdpban/xdp-ban/internal/policy"
+	"github.com/xdpban/xdp-ban/internal/quota"
+)
+
+type Handler struct {
+	db        *gorm.DB
+	approvals *approval.Service
+	sessions  *sessionStore
+	quota     *quota.Tracker
+}
+
+const sessionTTL = 8 * time.Hour
+
+func Register(r *gin.Engine, db *gorm.DB) {
+	baseURL := envOr("XDPBAN_BASE_URL", "http://localhost:8080")
+	h := &Handler{
+		db:        db,
+		approvals: approval.NewService(db, baseURL),
+		sessions:  newSessionStore(sessionTTL),
+		quota:     quota.NewTracker(),
+	}
+	h.restoreQuota()
+	r.SetHTMLTemplate(templates())
+
+	r.GET("/login", h.loginPage)
+	r.POST("/login", h.doLogin)
+	r.GET("/logout", h.logout)
+
+	r.GET("/approve/:token", h.approveShow)
+	r.POST("/approve/:token", h.approveDo)
+
+	r.StaticFile("/favicon.ico", "favicon.ico")
+
+	auth := r.Group("/", h.requireLogin)
+	{
+		auth.GET("/", h.dashboard)
+		auth.GET("/dashboard", h.dashboard)
+		auth.GET("/bans", h.requireCap(policy.BanRequestView), h.bansList)
+		auth.GET("/bans/new", h.requireCap(policy.BanRequestCreate), h.banNew)
+		auth.POST("/bans", h.requireCap(policy.BanRequestCreate), h.banCreate)
+		auth.POST("/bans/:id/approve", h.requireCap(policy.BanRequestApprove), h.banApprove)
+		auth.POST("/bans/:id/reject", h.requireCap(policy.BanRequestReject), h.banReject)
+		auth.GET("/bans/:id", h.requireCap(policy.BanRequestView), h.banDetail)
+
+		auth.GET("/scoped", h.requireCap(policy.BanRequestView), h.scopedBanList)
+		auth.GET("/scoped/new", h.requireCap(policy.BanRequestCreate), h.scopedBanNew)
+		auth.POST("/scoped", h.requireCap(policy.BanRequestCreate), h.scopedBanCreate)
+		auth.GET("/scoped/asn-search", h.requireCap(policy.BanRequestCreate), h.scopedASNSearch)
+		auth.POST("/scoped/preview", h.requireCap(policy.BanRequestCreate), h.scopedPreview)
+		auth.POST("/scoped/:id/approve", h.requireCap(policy.BanRequestApprove), h.scopedBanApprove)
+		auth.POST("/scoped/:id/reject", h.requireCap(policy.BanRequestReject), h.scopedBanReject)
+		auth.POST("/scoped/:id/revoke", h.requireCap(policy.UnbanExecute), h.scopedBanRevoke)
+
+		auth.GET("/users", h.requireCap(policy.UserManage), h.usersList)
+		auth.POST("/users", h.requireCap(policy.UserManage), h.userCreate)
+		auth.POST("/users/:id/password", h.requireCap(policy.UserManage), h.userChangePassword)
+		auth.POST("/users/:id/role", h.requireCap(policy.UserManage), h.userChangeRole)
+		auth.POST("/users/:id/toggle", h.requireCap(policy.UserManage), h.userToggleActive)
+		auth.POST("/users/:id/delete", h.requireCap(policy.UserManage), h.userDelete)
+
+		auth.GET("/prefixdb", h.requireCap(policy.SystemConfig), h.prefixDBPage)
+		auth.POST("/prefixdb/sync", h.requireCap(policy.SystemConfig), h.prefixDBSync)
+		auth.GET("/prefixdb/status", h.requireCap(policy.SystemConfig), h.prefixDBStatus)
+		auth.POST("/prefixdb/upload", h.requireCap(policy.SystemConfig), h.prefixDBUpload)
+		auth.POST("/prefixdb/overrides", h.requireCap(policy.SystemConfig), h.prefixDBSaveOverride)
+
+		auth.GET("/audit", h.requireCap(policy.AuditView), h.auditLog)
+
+		auth.GET("/report", h.requireCap(policy.AuditView), h.reportPage)
+		auth.GET("/report/export", h.requireCap(policy.AuditView), h.reportExport)
+	}
+}
+
+func (h *Handler) currentUser(c *gin.Context) *model.User {
+	tok, err := c.Cookie("sid")
+	if err != nil {
+		return nil
+	}
+	uid, ok := h.sessions.Get(tok)
+	if !ok {
+		return nil
+	}
+	var u model.User
+	if h.db.First(&u, uid).Error != nil || !u.Active {
+		return nil
+	}
+	return &u
+}
+
+func (h *Handler) requireLogin(c *gin.Context) {
+	if h.currentUser(c) == nil {
+		c.Redirect(http.StatusFound, "/login")
+		c.Abort()
+	}
+}
+
+func (h *Handler) requireCap(cap policy.Capability) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		u := h.currentUser(c)
+		if u == nil || !policy.Allow(u.Role, cap) {
+			c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "无权限执行此操作"})
+			c.Abort()
+		}
+	}
+}
+
+func (h *Handler) loginPage(c *gin.Context) {
+	c.HTML(http.StatusOK, "login.html", gin.H{})
+}
+
+func (h *Handler) doLogin(c *gin.Context) {
+	var u model.User
+	err := h.db.Where("username = ? AND active = ?", c.PostForm("username"), true).First(&u).Error
+	if err != nil || u.AuthSource != "local" || !u.CheckPassword(c.PostForm("password")) {
+		c.HTML(http.StatusUnauthorized, "login.html", gin.H{"err": "用户名或密码错误,或账号已停用"})
+		return
+	}
+	tok := randToken()
+	h.sessions.Put(tok, u.ID)
+
+	secure := envOr("XDPBAN_COOKIE_SECURE", "") != ""
+	c.SetCookie("sid", tok, int(sessionTTL.Seconds()), "/", "", secure, true)
+	now := time.Now()
+	h.db.Model(&u).Update("last_login_at", now)
+	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "User", itoa(u.ID), "login", "")
+	c.Redirect(http.StatusFound, "/dashboard")
+}
+
+func (h *Handler) logout(c *gin.Context) {
+	if tok, err := c.Cookie("sid"); err == nil {
+		h.sessions.Delete(tok)
+	}
+	c.SetCookie("sid", "", -1, "/", "", false, true)
+	c.Redirect(http.StatusFound, "/login")
+}
+
+func (h *Handler) dashboard(c *gin.Context) {
+	u := h.currentUser(c)
+	var pending, active, failed int64
+	h.db.Model(&model.BanRequest{}).Where("state = ?", "pending").Count(&pending)
+	h.db.Model(&model.BanRequest{}).Where("state = ?", "active").Count(&active)
+	h.db.Model(&model.Dispatch{}).Where("state = ?", "failed").Count(&failed)
+	c.HTML(http.StatusOK, "dashboard.html", gin.H{
+		"u": u, "nav": policy.NavSections(u.Role),
+		"pending": pending, "active": active, "failed": failed,
+		"canCreate": policy.Allow(u.Role, policy.BanRequestCreate),
+	})
+}
+
+func (h *Handler) bansList(c *gin.Context) {
+	u := h.currentUser(c)
+	var reqs []model.BanRequest
+	h.db.Order("created_at desc").Limit(200).Find(&reqs)
+	c.HTML(http.StatusOK, "bans.html", gin.H{
+		"u": u, "nav": policy.NavSections(u.Role), "reqs": reqs,
+		"canCreate":  policy.Allow(u.Role, policy.BanRequestCreate),
+		"canApprove": policy.Allow(u.Role, policy.BanRequestApprove),
+	})
+}
+
+func (h *Handler) banNew(c *gin.Context) {
+	u := h.currentUser(c)
+
+	c.HTML(http.StatusOK, "ban_new.html", gin.H{
+		"u": u, "nav": policy.NavSections(u.Role),
+		"target": strings.TrimSpace(c.Query("target")),
+		"reason": strings.TrimSpace(c.Query("reason")),
+	})
+}
+
+func (h *Handler) banCreate(c *gin.Context) {
+	u := h.currentUser(c)
+	target := strings.TrimSpace(c.PostForm("target"))
+	nav := policy.NavSections(u.Role)
+
+	if target == "" {
+		c.HTML(http.StatusBadRequest, "ban_new.html", gin.H{"u": u, "nav": nav, "err": "目标不能为空"})
+		return
+	}
+
+	if reason := h.guard().VetoReason(target); reason != "" {
+		c.HTML(http.StatusBadRequest, "ban_new.html", gin.H{"u": u, "nav": nav, "err": reason})
+		return
+	}
+
+	ttl := h.nextTTL(target)
+
+	req := model.BanRequest{
+		ActionType: "ban", Target: target, Source: "manual",
+		Reason: strings.TrimSpace(c.PostForm("reason")), State: "pending",
+		RequestedByID: &u.ID, ApprovalMode: "manual_dual",
+		TTLSeconds: ttl,
+	}
+	if err := h.db.Create(&req).Error; err != nil {
+		c.HTML(http.StatusInternalServerError, "ban_new.html", gin.H{"u": u, "nav": nav, "err": err.Error()})
+		return
+	}
+	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID), "created", target)
+
+	if err := h.approvals.GenTokensAndSend(&req, &u.ID); err != nil {
+		log.Printf("发送审批通知失败 req=%d: %v", req.ID, err)
+	}
+
+	c.Redirect(http.StatusFound, "/bans")
+}
+
+func (h *Handler) banApprove(c *gin.Context) {
+	u := h.currentUser(c)
+	var req model.BanRequest
+	if h.db.First(&req, c.Param("id")).Error != nil {
+		c.Redirect(http.StatusFound, "/bans")
+		return
+	}
+
+	if req.RequestedByID != nil && *req.RequestedByID == u.ID {
+		_ = model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID),
+			"self_approval_denied", "")
+		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "不能审批自己提交的请求(四眼原则)"})
+		return
+	}
+	if req.State != "pending" {
+		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理,当前状态:" + req.State})
+		return
+	}
+
+	now := time.Now()
+	updates := map[string]any{
+		"state":          "active",
+		"approved_by_id": u.ID,
+		"effective_at":   now,
+	}
+	if req.TTLSeconds != nil && *req.TTLSeconds > 0 {
+		expires := now.Add(time.Duration(*req.TTLSeconds) * time.Second)
+		updates["expires_at"] = expires
+	}
+	if err := h.db.Model(&req).Updates(updates).Error; err != nil {
+		c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": err.Error()})
+		return
+	}
+	req.ApprovedByID = &u.ID
+	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID), "approved", "")
+
+	if _, explain, err := h.dispatches().CreateDispatch(&req); err != nil {
+		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": explain})
+		return
+	}
+
+	h.recordLadder(req.Target)
+
+	c.Redirect(http.StatusFound, "/bans")
+}
+
+func (h *Handler) banReject(c *gin.Context) {
+	u := h.currentUser(c)
+	var req model.BanRequest
+	if h.db.First(&req, c.Param("id")).Error == nil {
+		h.db.Model(&req).Update("state", "rejected")
+		model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID), "rejected", "")
+	}
+	c.Redirect(http.StatusFound, "/bans")
+}
+
+func (h *Handler) banDetail(c *gin.Context) {
+	u := h.currentUser(c)
+	var req model.BanRequest
+	if h.db.First(&req, c.Param("id")).Error != nil {
+		c.Redirect(http.StatusFound, "/bans")
+		return
+	}
+	var approver model.User
+	if req.ApprovedByID != nil {
+		h.db.First(&approver, *req.ApprovedByID)
+	}
+	c.HTML(http.StatusOK, "ban_detail.html", gin.H{
+		"u": u, "nav": policy.NavSections(u.Role),
+		"req": req, "approver": approver,
+		"canApprove": policy.Allow(u.Role, policy.BanRequestApprove) && req.State == "pending",
+	})
+}
+
+func (h *Handler) auditLog(c *gin.Context) {
+	u := h.currentUser(c)
+	var logs []model.AuditLog
+	h.db.Order("occurred_at desc").Limit(500).Find(&logs)
+	c.HTML(http.StatusOK, "audit.html", gin.H{
+		"u": u, "nav": policy.NavSections(u.Role), "logs": logs,
+	})
+}
+
+func (h *Handler) approveShow(c *gin.Context) {
+	var token model.ApprovalToken
+	if h.db.Where("token = ? AND expires_at > ? AND used_at IS NULL", c.Param("token"), time.Now()).First(&token).Error != nil {
+		c.HTML(http.StatusNotFound, "error.html", gin.H{"msg": "审批链接已失效或已使用"})
+		return
+	}
+	var req model.BanRequest
+	h.db.First(&req, token.BanRequestID)
+	c.HTML(http.StatusOK, "approve.html", gin.H{"token": token, "req": req})
+}
+
+func (h *Handler) approveDo(c *gin.Context) {
+	action := c.PostForm("action")
+	if action != "approve" && action != "reject" {
+		c.HTML(http.StatusBadRequest, "error.html", gin.H{"msg": "非法操作"})
+		return
+	}
+
+	now := time.Now()
+	var token model.ApprovalToken
+	var req model.BanRequest
+
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("token = ? AND expires_at > ? AND used_at IS NULL",
+			c.Param("token"), now).First(&token).Error; err != nil {
+			return err
+		}
+		if err := tx.First(&req, token.BanRequestID).Error; err != nil {
+			return err
+		}
+		if req.State != "pending" {
+			return errStateConflict
+		}
+
+		if req.RequestedByID != nil && *req.RequestedByID == token.ApproverID {
+			return errSelfApproval
+		}
+
+		if err := tx.Model(&token).Update("used_at", now).Error; err != nil {
+			return err
+		}
+
+		if action == "approve" {
+			updates := map[string]any{
+				"state":              "active",
+				"approved_by_id":     token.ApproverID,
+				"approved_by_policy": "email_link",
+				"effective_at":       now,
+			}
+			if req.TTLSeconds != nil && *req.TTLSeconds > 0 {
+				updates["expires_at"] = now.Add(time.Duration(*req.TTLSeconds) * time.Second)
+			}
+			return tx.Model(&req).Updates(updates).Error
+		}
+		return tx.Model(&req).Update("state", "rejected").Error
+	})
+
+	switch {
+	case err == errSelfApproval:
+		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "不能审批自己提交的请求(四眼原则)"})
+		return
+	case err == errStateConflict:
+		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已被处理"})
+		return
+	case err != nil:
+		c.HTML(http.StatusNotFound, "error.html", gin.H{"msg": "审批链接已失效或已使用"})
+		return
+	}
+
+	actor := "approver:" + itoa(token.ApproverID)
+	if action == "approve" {
+		_ = model.WriteAudit(h.db, &token.ApproverID, actor, "BanRequest", itoa(req.ID), "approved_external", "")
+		req.ApprovedByID = &token.ApproverID
+		if _, explain, derr := h.dispatches().CreateDispatch(&req); derr != nil {
+			c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": explain})
+			return
+		}
+		h.recordLadder(req.Target)
+	} else {
+		_ = model.WriteAudit(h.db, &token.ApproverID, actor, "BanRequest", itoa(req.ID), "rejected_external", "")
+	}
+
+	c.HTML(http.StatusOK, "approve_done.html", gin.H{"action": action, "success": true})
+}
