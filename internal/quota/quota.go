@@ -14,6 +14,10 @@ const (
 	PerRuleMaxPrefixes = 32768
 
 	MaxAddressSharePPM = 250000
+
+	GlobalBanMapCapacity = 65536
+
+	GlobalBanHighWater = GlobalBanMapCapacity * 80 / 100
 )
 
 const TotalIPv4 = uint64(1) << 32
@@ -46,6 +50,9 @@ type Tracker struct {
 	prefixes int
 	rules    int
 	targets  int
+
+	globalPrefixes int
+	globalRules    int
 }
 
 func NewTracker() *Tracker { return &Tracker{} }
@@ -59,6 +66,17 @@ func (t *Tracker) Usage() Usage {
 		Targets:   t.targets,
 		Capacity:  MapCapacity,
 		HighWater: GlobalHighWater,
+	}
+}
+
+func (t *Tracker) GlobalBanUsage() Usage {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return Usage{
+		Prefixes:  t.globalPrefixes,
+		Rules:     t.globalRules,
+		Capacity:  GlobalBanMapCapacity,
+		HighWater: GlobalBanHighWater,
 	}
 }
 
@@ -90,10 +108,44 @@ func (t *Tracker) Release(prefixCount int) {
 	}
 }
 
+func (t *Tracker) ReserveGlobal(prefixCount int) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.globalPrefixes+prefixCount > GlobalBanHighWater {
+		return &QuotaError{
+			Kind:      KindGlobalBanFull,
+			Requested: prefixCount,
+			Available: GlobalBanHighWater - t.globalPrefixes,
+		}
+	}
+	t.globalPrefixes += prefixCount
+	t.globalRules++
+	return nil
+}
+
+func (t *Tracker) ReleaseGlobal(prefixCount int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.globalPrefixes -= prefixCount
+	if t.globalPrefixes < 0 {
+		t.globalPrefixes = 0
+	}
+	t.globalRules--
+	if t.globalRules < 0 {
+		t.globalRules = 0
+	}
+}
+
 func (t *Tracker) SetBaseline(prefixes, rules, targets int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.prefixes, t.rules, t.targets = prefixes, rules, targets
+}
+
+func (t *Tracker) SetGlobalBaseline(prefixes, rules int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.globalPrefixes, t.globalRules = prefixes, rules
 }
 
 type Decision struct {
@@ -154,8 +206,9 @@ func Check(t *Tracker, cidrs []netip.Prefix) Decision {
 type QuotaKind string
 
 const (
-	KindGlobalFull QuotaKind = "global_full"
-	KindPerRule    QuotaKind = "per_rule"
+	KindGlobalFull    QuotaKind = "global_full"
+	KindPerRule       QuotaKind = "per_rule"
+	KindGlobalBanFull QuotaKind = "global_ban_full"
 )
 
 type QuotaError struct {

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -9,7 +10,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
+	"github.com/xdpban/xdp-ban/internal/dispatch"
 	"github.com/xdpban/xdp-ban/internal/model"
 	"github.com/xdpban/xdp-ban/internal/policy"
 	"github.com/xdpban/xdp-ban/internal/prefixdb"
@@ -33,6 +36,7 @@ func (h *Handler) scopedBanNew(c *gin.Context) {
 		data["dbStats"] = st
 		data["countries"] = db.Countries()
 	}
+	data["csrf"] = h.csrfTokenFor(c)
 	c.HTML(http.StatusOK, "scoped_new.html", data)
 }
 
@@ -78,7 +82,7 @@ func (h *Handler) scopedPreview(c *gin.Context) {
 		samples = append(samples, p.String())
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"selector":          sel.String(),
 		"prefix_count":      d.PrefixCount,
 		"address_count":     d.AddressCount,
@@ -88,7 +92,13 @@ func (h *Handler) scopedPreview(c *gin.Context) {
 		"reason":            d.Reason,
 		"samples":           samples,
 		"usage":             h.quota.Usage(),
-	})
+	}
+	if sel.ASN != 0 {
+		if name, ok := prefixdb.CloudProviderName(sel.ASN); ok {
+			resp["cloud_warning"] = fmt.Sprintf("AS%d 属于知名云服务商(%s),大范围封禁可能影响大量无关租户,请确认这是有意为之。", sel.ASN, name)
+		}
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) scopedBanCreate(c *gin.Context) {
@@ -98,6 +108,7 @@ func (h *Handler) scopedBanCreate(c *gin.Context) {
 		c.HTML(code, "scoped_new.html", gin.H{
 			"u": u, "nav": nav, "err": msg,
 			"usage": h.quota.Usage(),
+			"csrf":  h.csrfTokenFor(c),
 		})
 	}
 
@@ -107,15 +118,22 @@ func (h *Handler) scopedBanCreate(c *gin.Context) {
 		return
 	}
 
-	targetIP, err := parseHostTarget(c.PostForm("target_ip"))
-	if err != nil {
-		fail(http.StatusBadRequest, err.Error())
-		return
-	}
+	rawTarget := strings.TrimSpace(c.PostForm("target_ip"))
+	global := rawTarget == ""
 
-	if reason := h.guard().VetoReason(targetIP); reason != "" {
-		fail(http.StatusBadRequest, "目标地址被保护集拒绝:"+reason)
-		return
+	var targetIP string
+	if !global {
+		var err error
+		targetIP, err = parseHostTarget(rawTarget)
+		if err != nil {
+			fail(http.StatusBadRequest, err.Error())
+			return
+		}
+
+		if reason := h.guard().VetoReason(targetIP); reason != "" {
+			fail(http.StatusBadRequest, "目标地址被保护集拒绝:"+reason)
+			return
+		}
 	}
 
 	sel, err := parseSelector(c)
@@ -130,6 +148,13 @@ func (h *Handler) scopedBanCreate(c *gin.Context) {
 		return
 	}
 
+	if global {
+		if reason := h.guard().VetoReasonAll(cidrs); reason != "" {
+			fail(http.StatusBadRequest, "解析出的地址范围命中保护集:"+reason)
+			return
+		}
+	}
+
 	d := quota.Check(h.quota, cidrs)
 	if !d.Allowed {
 		fail(http.StatusBadRequest, d.Reason)
@@ -141,14 +166,25 @@ func (h *Handler) scopedBanCreate(c *gin.Context) {
 		return
 	}
 
-	if err := h.quota.Reserve(d.PrefixCount); err != nil {
-		fail(http.StatusConflict, err.Error())
-		return
+	if global {
+		if err := h.quota.ReserveGlobal(d.PrefixCount); err != nil {
+			fail(http.StatusConflict, err.Error())
+			return
+		}
+	} else {
+		if err := h.quota.Reserve(d.PrefixCount); err != nil {
+			fail(http.StatusConflict, err.Error())
+			return
+		}
 	}
 
-	ttl := h.nextTTL(targetIP)
+	var ttl *int64
+	if !global {
+		ttl = h.nextTTL(targetIP)
+	}
 	sb := model.ScopedBan{
 		TargetIP:      targetIP,
+		Global:        global,
 		Country:       sel.Country,
 		ASN:           sel.ASN,
 		PrefixCount:   d.PrefixCount,
@@ -161,13 +197,17 @@ func (h *Handler) scopedBanCreate(c *gin.Context) {
 		OverrideAck:   overrideAck && d.RequiresOverride,
 	}
 	if err := h.db.Create(&sb).Error; err != nil {
-		h.quota.Release(d.PrefixCount)
+		if global {
+			h.quota.ReleaseGlobal(d.PrefixCount)
+		} else {
+			h.quota.Release(d.PrefixCount)
+		}
 		fail(http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	detail := fmt.Sprintf("scope=%s target=%s prefixes=%d addresses=%d override=%v",
-		sel.String(), targetIP, d.PrefixCount, d.AddressCount, sb.OverrideAck)
+	detail := fmt.Sprintf("scope=%s target=%s prefixes=%d addresses=%d override=%v global=%v",
+		sel.String(), targetIP, d.PrefixCount, d.AddressCount, sb.OverrideAck, global)
 	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "ScopedBan", itoa(sb.ID), "created", detail)
 
 	c.Redirect(http.StatusFound, "/scoped")
@@ -182,6 +222,7 @@ func (h *Handler) scopedBanList(c *gin.Context) {
 		"usage":      h.quota.Usage(),
 		"canCreate":  policy.Allow(u.Role, policy.BanRequestCreate),
 		"canApprove": policy.Allow(u.Role, policy.BanRequestApprove),
+		"csrf":       h.csrfTokenFor(c),
 	})
 }
 
@@ -192,10 +233,8 @@ func (h *Handler) scopedBanApprove(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/scoped")
 		return
 	}
-	if sb.RequestedByID != nil && *sb.RequestedByID == u.ID {
-		_ = model.WriteAudit(h.db, &u.ID, u.Label(), "ScopedBan", itoa(sb.ID),
-			"self_approval_denied", "")
-		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "不能审批自己提交的请求(四眼原则)"})
+	if selfActionDenied(u.ID, sb.RequestedByID) {
+		h.denySelfAction(c, u.ID, u.Label(), "ScopedBan", itoa(sb.ID))
 		return
 	}
 	if sb.State != "pending" {
@@ -210,7 +249,35 @@ func (h *Handler) scopedBanApprove(c *gin.Context) {
 	if sb.TTLSeconds != nil && *sb.TTLSeconds > 0 {
 		updates["expires_at"] = now.Add(time.Duration(*sb.TTLSeconds) * time.Second)
 	}
-	if err := h.db.Model(&sb).Updates(updates).Error; err != nil {
+
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&sb, sb.ID).Error; err != nil {
+			return err
+		}
+		if selfActionDenied(u.ID, sb.RequestedByID) {
+			return errSelfApproval
+		}
+		if sb.State != "pending" {
+			return errStateConflict
+		}
+		res := tx.Model(&sb).Where("state = ?", "pending").Updates(updates)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return errStateConflict
+		}
+		return nil
+	})
+
+	switch {
+	case err == errSelfApproval:
+		h.denySelfAction(c, u.ID, u.Label(), "ScopedBan", itoa(sb.ID))
+		return
+	case err == errStateConflict:
+		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理,当前状态:" + sb.State})
+		return
+	case err != nil:
 		c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": err.Error()})
 		return
 	}
@@ -234,12 +301,22 @@ func (h *Handler) scopedBanApprove(c *gin.Context) {
 		_ = model.WriteAudit(h.db, &u.ID, u.Label(), "ScopedBan", itoa(sb.ID),
 			"prefix_drift", drift)
 
-		h.quota.Release(sb.PrefixCount)
-		if err := h.quota.Reserve(len(cidrs)); err != nil {
-			h.quota.Reserve(sb.PrefixCount)
-			c.HTML(http.StatusConflict, "error.html", gin.H{
-				"msg": "前缀库更新后该规则展开量超出配额:" + err.Error()})
-			return
+		if sb.Global {
+			h.quota.ReleaseGlobal(sb.PrefixCount)
+			if err := h.quota.ReserveGlobal(len(cidrs)); err != nil {
+				h.quota.ReserveGlobal(sb.PrefixCount)
+				c.HTML(http.StatusConflict, "error.html", gin.H{
+					"msg": "前缀库更新后该规则展开量超出配额:" + err.Error()})
+				return
+			}
+		} else {
+			h.quota.Release(sb.PrefixCount)
+			if err := h.quota.Reserve(len(cidrs)); err != nil {
+				h.quota.Reserve(sb.PrefixCount)
+				c.HTML(http.StatusConflict, "error.html", gin.H{
+					"msg": "前缀库更新后该规则展开量超出配额:" + err.Error()})
+				return
+			}
 		}
 		h.db.Model(&sb).Updates(map[string]any{
 			"prefix_count": len(cidrs), "resolved_at": now,
@@ -251,12 +328,18 @@ func (h *Handler) scopedBanApprove(c *gin.Context) {
 		prefixes = append(prefixes, p.String())
 	}
 
-	if _, explain, err := h.dispatches().CreateScopedDispatch(&sb, prefixes); err != nil {
-		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": explain})
-		return
+	if sb.Global {
+		if _, explain, err := h.dispatches().CreateGlobalScopedDispatch(&sb, prefixes); err != nil {
+			c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": explain})
+			return
+		}
+	} else {
+		if _, explain, err := h.dispatches().CreateScopedDispatch(&sb, prefixes); err != nil {
+			c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": explain})
+			return
+		}
+		h.recordLadder(sb.TargetIP)
 	}
-
-	h.recordLadder(sb.TargetIP)
 
 	c.Redirect(http.StatusFound, "/scoped")
 }
@@ -268,12 +351,28 @@ func (h *Handler) scopedBanReject(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/scoped")
 		return
 	}
-	if sb.State != "pending" {
-		c.Redirect(http.StatusFound, "/scoped")
+	if selfActionDenied(u.ID, sb.RequestedByID) {
+		h.denySelfAction(c, u.ID, u.Label(), "ScopedBan", itoa(sb.ID))
 		return
 	}
-	h.db.Model(&sb).Update("state", "rejected")
-	h.quota.Release(sb.PrefixCount)
+	if sb.State != "pending" {
+		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理,当前状态:" + sb.State})
+		return
+	}
+	res := h.db.Model(&sb).Where("state = ?", "pending").Update("state", "rejected")
+	if res.Error != nil {
+		c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": res.Error.Error()})
+		return
+	}
+	if res.RowsAffected == 0 {
+		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理"})
+		return
+	}
+	if sb.Global {
+		h.quota.ReleaseGlobal(sb.PrefixCount)
+	} else {
+		h.quota.Release(sb.PrefixCount)
+	}
 	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "ScopedBan", itoa(sb.ID), "rejected", sb.Label())
 	c.Redirect(http.StatusFound, "/scoped")
 }
@@ -291,11 +390,65 @@ func (h *Handler) scopedBanRevoke(c *gin.Context) {
 		return
 	}
 
+	if sb.Global {
+		prefixes, err := h.scopedGlobalDispatchPrefixes(&sb)
+		if err != nil {
+			c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": err.Error()})
+			return
+		}
+		for _, p := range prefixes {
+			if err := h.revoker.RevokeGlobal(p); err != nil {
+				c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": err.Error()})
+				return
+			}
+		}
+	} else if prefixes, err := h.scopedDispatchPrefixes(&sb); err != nil {
+		c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": err.Error()})
+		return
+	} else if err := h.revoker.RevokeScoped(sb.TargetIP, prefixes); err != nil {
+		c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": err.Error()})
+		return
+	}
+
 	now := time.Now()
 	h.db.Model(&sb).Updates(map[string]any{"state": "revoked", "revoked_at": now})
-	h.quota.Release(sb.PrefixCount)
-	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "ScopedBan", itoa(sb.ID), "revoked", sb.Label())
+	if sb.Global {
+		h.quota.ReleaseGlobal(sb.PrefixCount)
+	} else {
+		h.quota.Release(sb.PrefixCount)
+	}
+	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "ScopedBan", itoa(sb.ID), "rolled_back", sb.Label())
 	c.Redirect(http.StatusFound, "/scoped")
+}
+
+func (h *Handler) scopedDispatchPrefixes(sb *model.ScopedBan) ([]string, error) {
+	banID := fmt.Sprintf("scoped-%d-%s", sb.ID, sb.TargetIP)
+	var d model.Dispatch
+	if err := h.db.Where("ban_id = ?", banID).First(&d).Error; err != nil {
+		return nil, nil
+	}
+	var payload dispatch.BanPayload
+	if err := json.Unmarshal([]byte(d.Payload), &payload); err != nil {
+		return nil, fmt.Errorf("解析下发记录失败(ban_id=%s): %w", banID, err)
+	}
+	return payload.Prefixes, nil
+}
+
+func (h *Handler) scopedGlobalDispatchPrefixes(sb *model.ScopedBan) ([]string, error) {
+	var dispatches []model.Dispatch
+	prefix := fmt.Sprintf("scoped-global-%d-", sb.ID)
+	if err := h.db.Where("ban_id LIKE ?", prefix+"%").Find(&dispatches).Error; err != nil {
+		return nil, fmt.Errorf("查询下发记录失败(id=%d): %w", sb.ID, err)
+	}
+	prefixes := make([]string, 0, len(dispatches))
+	for _, d := range dispatches {
+		var payload dispatch.BanPayload
+		if err := json.Unmarshal([]byte(d.Payload), &payload); err != nil {
+			return nil, fmt.Errorf("解析下发记录失败(ban_id=%s): %w", d.BanID, err)
+		}
+		prefixes = append(prefixes, payload.Target)
+	}
+	return prefixes, nil
 }
 
 func parseHostTarget(raw string) (string, error) {

@@ -51,6 +51,24 @@ func (g *Guard) VetoReason(target string) string {
 	return ""
 }
 
+func (g *Guard) AssertSafeAll(targets []netip.Prefix) error {
+	for _, t := range targets {
+		for _, p := range g.protected {
+			if p.Overlaps(t) {
+				return fmt.Errorf("SAFETY VETO: 前缀 %s 命中绝对保护集(%s),封禁被最终否决", t, p)
+			}
+		}
+	}
+	return nil
+}
+
+func (g *Guard) VetoReasonAll(targets []netip.Prefix) string {
+	if err := g.AssertSafeAll(targets); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
 func toPrefix(s string) (netip.Prefix, error) {
 	if p, err := netip.ParsePrefix(s); err == nil {
 		return p, nil

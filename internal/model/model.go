@@ -123,6 +123,7 @@ type ScopedBan struct {
 	ID uint `gorm:"primaryKey"`
 
 	TargetIP string `gorm:"index;not null"`
+	Global   bool   `gorm:"not null;default:false"`
 
 	Country string `gorm:"index"`
 	ASN     uint32 `gorm:"index"`
@@ -156,6 +157,9 @@ func (s *ScopedBan) Label() string {
 		scope = s.Country
 	case s.ASN != 0:
 		scope = "AS" + itoa64(uint64(s.ASN))
+	}
+	if s.Global {
+		return scope + " → 全局(所有受保护目标)"
 	}
 	return scope + " → " + s.TargetIP
 }

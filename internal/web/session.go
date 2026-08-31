@@ -14,6 +14,7 @@ type sessionStore struct {
 type sessionEntry struct {
 	userID    uint
 	expiresAt time.Time
+	csrfToken string
 }
 
 func newSessionStore(ttl time.Duration) *sessionStore {
@@ -28,7 +29,18 @@ func newSessionStore(ttl time.Duration) *sessionStore {
 func (s *sessionStore) Put(token string, userID uint) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data[token] = sessionEntry{userID: userID, expiresAt: time.Now().Add(s.ttl)}
+	s.data[token] = sessionEntry{userID: userID, expiresAt: time.Now().Add(s.ttl), csrfToken: randToken()}
+}
+
+func (s *sessionStore) CSRFToken(token string) (string, bool) {
+	s.mu.RLock()
+	e, ok := s.data[token]
+	s.mu.RUnlock()
+
+	if !ok || time.Now().After(e.expiresAt) {
+		return "", false
+	}
+	return e.csrfToken, true
 }
 
 func (s *sessionStore) Get(token string) (uint, bool) {

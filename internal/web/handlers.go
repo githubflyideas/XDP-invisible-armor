@@ -15,22 +15,29 @@ import (
 	"github.com/xdpban/xdp-ban/internal/quota"
 )
 
+type Revoker interface {
+	RevokeGlobal(target string) error
+	RevokeScoped(targetIP string, prefixes []string) error
+}
+
 type Handler struct {
 	db        *gorm.DB
 	approvals *approval.Service
 	sessions  *sessionStore
 	quota     *quota.Tracker
+	revoker   Revoker
 }
 
 const sessionTTL = 8 * time.Hour
 
-func Register(r *gin.Engine, db *gorm.DB) {
+func Register(r *gin.Engine, db *gorm.DB, revoker Revoker) {
 	baseURL := envOr("XDPBAN_BASE_URL", "http://localhost:8080")
 	h := &Handler{
 		db:        db,
 		approvals: approval.NewService(db, baseURL),
 		sessions:  newSessionStore(sessionTTL),
 		quota:     quota.NewTracker(),
+		revoker:   revoker,
 	}
 	h.restoreQuota()
 	r.SetHTMLTemplate(templates())
@@ -44,7 +51,7 @@ func Register(r *gin.Engine, db *gorm.DB) {
 
 	r.StaticFile("/favicon.ico", "favicon.ico")
 
-	auth := r.Group("/", h.requireLogin)
+	auth := r.Group("/", h.requireLogin, h.requireCSRF)
 	{
 		auth.GET("/", h.dashboard)
 		auth.GET("/dashboard", h.dashboard)
@@ -54,6 +61,10 @@ func Register(r *gin.Engine, db *gorm.DB) {
 		auth.POST("/bans/:id/approve", h.requireCap(policy.BanRequestApprove), h.banApprove)
 		auth.POST("/bans/:id/reject", h.requireCap(policy.BanRequestReject), h.banReject)
 		auth.GET("/bans/:id", h.requireCap(policy.BanRequestView), h.banDetail)
+
+		auth.GET("/lookup", h.requireCap(policy.BanRequestView), h.lookupPage)
+		auth.POST("/lookup", h.requireCap(policy.BanRequestView), h.lookupSearch)
+		auth.POST("/lookup/:kind/:id/rollback", h.requireCap(policy.UnbanExecute), h.lookupRollback)
 
 		auth.GET("/scoped", h.requireCap(policy.BanRequestView), h.scopedBanList)
 		auth.GET("/scoped/new", h.requireCap(policy.BanRequestCreate), h.scopedBanNew)
@@ -82,6 +93,15 @@ func Register(r *gin.Engine, db *gorm.DB) {
 		auth.GET("/report", h.requireCap(policy.AuditView), h.reportPage)
 		auth.GET("/report/export", h.requireCap(policy.AuditView), h.reportExport)
 	}
+}
+
+func (h *Handler) csrfTokenFor(c *gin.Context) string {
+	tok, err := c.Cookie("sid")
+	if err != nil {
+		return ""
+	}
+	t, _ := h.sessions.CSRFToken(tok)
+	return t
 }
 
 func (h *Handler) currentUser(c *gin.Context) *model.User {
@@ -149,13 +169,16 @@ func (h *Handler) logout(c *gin.Context) {
 
 func (h *Handler) dashboard(c *gin.Context) {
 	u := h.currentUser(c)
-	var pending, active, failed int64
+	var pending, active, failed, driftCount int64
 	h.db.Model(&model.BanRequest{}).Where("state = ?", "pending").Count(&pending)
 	h.db.Model(&model.BanRequest{}).Where("state = ?", "active").Count(&active)
 	h.db.Model(&model.Dispatch{}).Where("state = ?", "failed").Count(&failed)
+	h.db.Model(&model.AuditLog{}).
+		Where("event = ? AND occurred_at >= ?", "drift_detected", time.Now().Add(-24*time.Hour)).
+		Count(&driftCount)
 	c.HTML(http.StatusOK, "dashboard.html", gin.H{
 		"u": u, "nav": policy.NavSections(u.Role),
-		"pending": pending, "active": active, "failed": failed,
+		"pending": pending, "active": active, "failed": failed, "driftCount": driftCount,
 		"canCreate": policy.Allow(u.Role, policy.BanRequestCreate),
 	})
 }
@@ -168,6 +191,7 @@ func (h *Handler) bansList(c *gin.Context) {
 		"u": u, "nav": policy.NavSections(u.Role), "reqs": reqs,
 		"canCreate":  policy.Allow(u.Role, policy.BanRequestCreate),
 		"canApprove": policy.Allow(u.Role, policy.BanRequestApprove),
+		"csrf":       h.csrfTokenFor(c),
 	})
 }
 
@@ -178,6 +202,7 @@ func (h *Handler) banNew(c *gin.Context) {
 		"u": u, "nav": policy.NavSections(u.Role),
 		"target": strings.TrimSpace(c.Query("target")),
 		"reason": strings.TrimSpace(c.Query("reason")),
+		"csrf":   h.csrfTokenFor(c),
 	})
 }
 
@@ -225,10 +250,8 @@ func (h *Handler) banApprove(c *gin.Context) {
 		return
 	}
 
-	if req.RequestedByID != nil && *req.RequestedByID == u.ID {
-		_ = model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID),
-			"self_approval_denied", "")
-		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "不能审批自己提交的请求(四眼原则)"})
+	if selfActionDenied(u.ID, req.RequestedByID) {
+		h.denySelfAction(c, u.ID, u.Label(), "BanRequest", itoa(req.ID))
 		return
 	}
 	if req.State != "pending" {
@@ -246,10 +269,39 @@ func (h *Handler) banApprove(c *gin.Context) {
 		expires := now.Add(time.Duration(*req.TTLSeconds) * time.Second)
 		updates["expires_at"] = expires
 	}
-	if err := h.db.Model(&req).Updates(updates).Error; err != nil {
+
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&req, req.ID).Error; err != nil {
+			return err
+		}
+		if selfActionDenied(u.ID, req.RequestedByID) {
+			return errSelfApproval
+		}
+		if req.State != "pending" {
+			return errStateConflict
+		}
+		res := tx.Model(&req).Where("state = ?", "pending").Updates(updates)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return errStateConflict
+		}
+		return nil
+	})
+
+	switch {
+	case err == errSelfApproval:
+		h.denySelfAction(c, u.ID, u.Label(), "BanRequest", itoa(req.ID))
+		return
+	case err == errStateConflict:
+		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理,当前状态:" + req.State})
+		return
+	case err != nil:
 		c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": err.Error()})
 		return
 	}
+
 	req.ApprovedByID = &u.ID
 	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID), "approved", "")
 
@@ -266,10 +318,28 @@ func (h *Handler) banApprove(c *gin.Context) {
 func (h *Handler) banReject(c *gin.Context) {
 	u := h.currentUser(c)
 	var req model.BanRequest
-	if h.db.First(&req, c.Param("id")).Error == nil {
-		h.db.Model(&req).Update("state", "rejected")
-		model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID), "rejected", "")
+	if h.db.First(&req, c.Param("id")).Error != nil {
+		c.Redirect(http.StatusFound, "/bans")
+		return
 	}
+	if selfActionDenied(u.ID, req.RequestedByID) {
+		h.denySelfAction(c, u.ID, u.Label(), "BanRequest", itoa(req.ID))
+		return
+	}
+	if req.State != "pending" {
+		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理,当前状态:" + req.State})
+		return
+	}
+	res := h.db.Model(&req).Where("state = ?", "pending").Update("state", "rejected")
+	if res.Error != nil {
+		c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": res.Error.Error()})
+		return
+	}
+	if res.RowsAffected == 0 {
+		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理"})
+		return
+	}
+	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID), "rejected", "")
 	c.Redirect(http.StatusFound, "/bans")
 }
 
@@ -288,6 +358,7 @@ func (h *Handler) banDetail(c *gin.Context) {
 		"u": u, "nav": policy.NavSections(u.Role),
 		"req": req, "approver": approver,
 		"canApprove": policy.Allow(u.Role, policy.BanRequestApprove) && req.State == "pending",
+		"csrf":       h.csrfTokenFor(c),
 	})
 }
 
@@ -300,6 +371,8 @@ func (h *Handler) auditLog(c *gin.Context) {
 	})
 }
 
+// approveShow/approveDo 有意不接入 requireCSRF:该路径不在会话体系内(邮件里的一次性链接),
+// 其防伪造性来自 token 本身不可猜测、一次性使用、且仅通过 URL 传递(不落 cookie)。
 func (h *Handler) approveShow(c *gin.Context) {
 	var token model.ApprovalToken
 	if h.db.Where("token = ? AND expires_at > ? AND used_at IS NULL", c.Param("token"), time.Now()).First(&token).Error != nil {
@@ -352,9 +425,23 @@ func (h *Handler) approveDo(c *gin.Context) {
 			if req.TTLSeconds != nil && *req.TTLSeconds > 0 {
 				updates["expires_at"] = now.Add(time.Duration(*req.TTLSeconds) * time.Second)
 			}
-			return tx.Model(&req).Updates(updates).Error
+			res := tx.Model(&req).Where("state = ?", "pending").Updates(updates)
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				return errStateConflict
+			}
+			return nil
 		}
-		return tx.Model(&req).Update("state", "rejected").Error
+		res := tx.Model(&req).Where("state = ?", "pending").Update("state", "rejected")
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return errStateConflict
+		}
+		return nil
 	})
 
 	switch {

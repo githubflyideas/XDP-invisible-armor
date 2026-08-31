@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/netip"
 	"time"
+
+	"github.com/cilium/ebpf"
 
 	"github.com/xdpban/xdp-ban/internal/banmap"
 )
@@ -12,6 +15,13 @@ import (
 type mapWriter interface {
 	Put(key, value any) error
 	Delete(key any) error
+	Iterate() MapIterator
+}
+
+// MapIterator 的形状对齐 *ebpf.Map.Iterate() 真实返回的 *ebpf.MapIterator——
+// 生产类型零包装即可满足该接口,测试里用切片实现一个假的即可。
+type MapIterator interface {
+	Next(keyOut, valueOut any) bool
 }
 
 type banMaps struct {
@@ -104,6 +114,54 @@ func (m *banMaps) applyScoped(p *BanPayload, val []byte) error {
 	return nil
 }
 
+func (m *banMaps) RevokeGlobal(target string) error {
+	prefix, err := banmap.ParseIPv4Prefix(target)
+	if err != nil {
+		return err
+	}
+	key, err := banmap.EncodeGlobalKey(prefix)
+	if err != nil {
+		return err
+	}
+	if err := m.globalBans.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("删除 %s (%s): %w", banmap.MapGlobalBans, prefix, err)
+	}
+	log.Printf("  ✓ 已回滚全局封禁 %s", prefix)
+	return nil
+}
+
+func (m *banMaps) RevokeScoped(targetIP string, prefixes []string) error {
+	targetAddr, err := netip.ParseAddr(targetIP)
+	if err != nil {
+		return fmt.Errorf("非法目标主机 %q: %w", targetIP, err)
+	}
+	if !targetAddr.Is4() {
+		return fmt.Errorf("目标仅支持 IPv4: %q", targetIP)
+	}
+
+	tid, ok := m.targetIDs[targetAddr.String()]
+	if !ok {
+
+		return nil
+	}
+
+	for _, s := range prefixes {
+		prefix, err := banmap.ParseIPv4Prefix(s)
+		if err != nil {
+			return fmt.Errorf("非法前缀 %q: %w", s, err)
+		}
+		key, err := banmap.EncodeSrcKey(tid, prefix)
+		if err != nil {
+			return err
+		}
+		if err := m.srcBans.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("删除 %s (%s → %s): %w", banmap.MapSrcBans, prefix, targetAddr, err)
+		}
+	}
+	log.Printf("  ✓ 已回滚定向封禁 %d 条源前缀 → %s (target_id=%d)", len(prefixes), targetAddr, tid)
+	return nil
+}
+
 func (m *banMaps) ensureTarget(addr netip.Addr) (uint32, error) {
 	s := addr.String()
 	if tid, ok := m.targetIDs[s]; ok {
@@ -122,4 +180,20 @@ func (m *banMaps) ensureTarget(addr netip.Addr) (uint32, error) {
 	m.targetIDs[s] = tid
 	m.nextTargetID++
 	return tid, nil
+}
+
+// ListGlobalBans 遍历 src_ban_global map,返回当前存活的全局封禁前缀集合
+// (键为前缀的字符串表示,如 "203.0.113.0/24")。用于与 DB 侧 dispatch 记录做回读核对。
+func (m *banMaps) ListGlobalBans() (map[string]bool, error) {
+	out := make(map[string]bool)
+	it := m.globalBans.Iterate()
+	var key, val []byte
+	for it.Next(&key, &val) {
+		prefix, err := banmap.DecodeGlobalKey(key)
+		if err != nil {
+			return nil, fmt.Errorf("解码 %s key 失败: %w", banmap.MapGlobalBans, err)
+		}
+		out[prefix.String()] = true
+	}
+	return out, nil
 }

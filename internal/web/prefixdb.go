@@ -33,6 +33,7 @@ func (h *Handler) prefixDBPage(c *gin.Context) {
 	if b, err := os.ReadFile(prefixdb.OverridePath()); err == nil {
 		data["overrideText"] = string(b)
 	}
+	data["csrf"] = h.csrfTokenFor(c)
 	c.HTML(http.StatusOK, "prefixdb.html", data)
 }
 

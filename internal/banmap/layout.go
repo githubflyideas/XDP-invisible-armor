@@ -73,6 +73,20 @@ func EncodeGlobalKey(prefix netip.Prefix) ([]byte, error) {
 	return b, nil
 }
 
+func DecodeGlobalKey(b []byte) (netip.Prefix, error) {
+	if len(b) < GlobalKeySize {
+		return netip.Prefix{}, fmt.Errorf("global_key 长度 %d,期望 %d", len(b), GlobalKeySize)
+	}
+	bits := binary.LittleEndian.Uint32(b[0:4])
+	if bits > 32 {
+		return netip.Prefix{}, fmt.Errorf("非法前缀长度 %d", bits)
+	}
+	var a4 [4]byte
+	copy(a4[:], b[4:8])
+	addr := netip.AddrFrom4(a4)
+	return netip.PrefixFrom(addr, int(bits)), nil
+}
+
 func EncodeSrcKey(targetID uint32, prefix netip.Prefix) ([]byte, error) {
 	if !prefix.Addr().Is4() {
 		return nil, fmt.Errorf("仅支持 IPv4 前缀,收到 %s", prefix)

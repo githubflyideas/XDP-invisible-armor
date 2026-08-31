@@ -55,6 +55,7 @@ textarea{width:100%;min-height:190px;font-family:"SF Mono",Menlo,Consolas,monosp
 后通过下方"方式二"上传。
 </p>
 <form method="post" action="/prefixdb/sync">
+<input type="hidden" name="csrf_token" value="{{.csrf}}">
 {{range $i, $s := .sources}}
 <label class="src">
   <input type="radio" name="source" value="{{$s.ID}}"{{if eq $i 0}} checked{{end}}>
@@ -76,6 +77,7 @@ textarea{width:100%;min-height:190px;font-family:"SF Mono",Menlo,Consolas,monosp
 
 <div class="card"><div class="hd">方式二:上传文件(隔离网环境)</div><div class="bd">
 <form method="post" action="/prefixdb/upload" enctype="multipart/form-data">
+<input type="hidden" name="csrf_token" value="{{.csrf}}">
 <label>数据文件(支持 .tsv / .tsv.gz,自动识别是否压缩)</label>
 <input type="file" name="dbfile" required>
 <label style="margin-top:12px">文件格式</label>
@@ -99,6 +101,7 @@ textarea{width:100%;min-height:190px;font-family:"SF Mono",Menlo,Consolas,monosp
 198.51.100.0&nbsp;&nbsp;198.51.100.255&nbsp;&nbsp;SG&nbsp;&nbsp;0&nbsp;&nbsp;手工修正
 </div>
 <form method="post" action="/prefixdb/overrides">
+<input type="hidden" name="csrf_token" value="{{.csrf}}">
 <textarea name="overrides" spellcheck="false" placeholder="# 一行一条规则,留空表示无本地覆盖">{{.overrideText}}</textarea>
 <div style="margin-top:12px">
 <button class="btn primary">保存并立即生效</button>

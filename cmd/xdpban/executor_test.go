@@ -47,6 +47,32 @@ func (m *fakeMap) Delete(key any) error {
 	return nil
 }
 
+func (m *fakeMap) Iterate() MapIterator {
+	keys := make([][]byte, 0, len(m.entries))
+	vals := make([][]byte, 0, len(m.entries))
+	for k, v := range m.entries {
+		keys = append(keys, []byte(k))
+		vals = append(vals, v)
+	}
+	return &fakeMapIterator{keys: keys, vals: vals}
+}
+
+type fakeMapIterator struct {
+	keys [][]byte
+	vals [][]byte
+	pos  int
+}
+
+func (it *fakeMapIterator) Next(keyOut, valueOut any) bool {
+	if it.pos >= len(it.keys) {
+		return false
+	}
+	*(keyOut.(*[]byte)) = it.keys[it.pos]
+	*(valueOut.(*[]byte)) = it.vals[it.pos]
+	it.pos++
+	return true
+}
+
 func newTestMaps() (*banMaps, *fakeMap, *fakeMap, *fakeMap) {
 	g := newFakeMap(banmap.MapGlobalBans)
 	t := newFakeMap(banmap.MapTargetHosts)
@@ -130,6 +156,65 @@ func TestApply_ScopedWritesBothMaps(t *testing.T) {
 		if tid == 0 {
 			t.Errorf("target_id 为 0 —— 0 应保留不用,以区分'未分配'")
 		}
+	}
+}
+
+func TestRevokeGlobal_DeletesPreviouslyAppliedKey(t *testing.T) {
+	bm, global, _, _ := newTestMaps()
+
+	if err := bm.Apply(&BanPayload{Target: "203.0.113.7", TTLSecs: 600}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	wantKey, _ := banmap.EncodeGlobalKey(netip.MustParsePrefix("203.0.113.7/32"))
+	if _, ok := global.entries[string(wantKey)]; !ok {
+		t.Fatalf("Apply 后未找到 key,前提条件不满足")
+	}
+
+	if err := bm.RevokeGlobal("203.0.113.7"); err != nil {
+		t.Fatalf("RevokeGlobal: %v", err)
+	}
+	if _, ok := global.entries[string(wantKey)]; ok {
+		t.Errorf("RevokeGlobal 后 key 仍存在")
+	}
+}
+
+func TestRevokeGlobal_NeverAppliedIsNotError(t *testing.T) {
+	bm, _, _, _ := newTestMaps()
+
+	if err := bm.RevokeGlobal("198.51.100.9"); err != nil {
+		t.Errorf("撤销一个从未下发过的全局封禁应静默成功,实际报错: %v", err)
+	}
+}
+
+func TestRevokeScoped_DeletesPreviouslyAppliedKeys(t *testing.T) {
+	bm, _, _, src := newTestMaps()
+
+	prefixes := []string{"203.0.113.0/24", "198.51.100.0/24"}
+	if err := bm.Apply(&BanPayload{
+		ScopedTarget: "10.0.1.100",
+		Prefixes:     prefixes,
+		TTLSecs:      3600,
+	}); err != nil {
+		t.Fatalf("Apply scoped: %v", err)
+	}
+	if src.puts != 2 {
+		t.Fatalf("Apply 后 src puts = %d,期望 2", src.puts)
+	}
+
+	if err := bm.RevokeScoped("10.0.1.100", prefixes); err != nil {
+		t.Fatalf("RevokeScoped: %v", err)
+	}
+	if len(src.entries) != 0 {
+		t.Errorf("RevokeScoped 后 src_ban 仍残留 %d 条", len(src.entries))
+	}
+}
+
+func TestRevokeScoped_UnknownTargetIsNotError(t *testing.T) {
+	bm, _, _, _ := newTestMaps()
+
+	err := bm.RevokeScoped("10.0.1.200", []string{"203.0.113.0/24"})
+	if err != nil {
+		t.Errorf("撤销一个从未 ensureTarget 过的目标应静默成功(target_id 映射非持久化),实际报错: %v", err)
 	}
 }
 

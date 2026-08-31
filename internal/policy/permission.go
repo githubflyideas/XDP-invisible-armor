@@ -59,6 +59,7 @@ func NavSections(role string) []NavSection {
 	all := []NavSection{
 		{"dashboard", "Dashboard", DashboardView},
 		{"bans", "封禁请求", BanRequestView},
+		{"lookup", "IP 查询", BanRequestView},
 		{"scoped", "范围封禁", BanRequestView},
 		{"prefixdb", "IP 库管理", SystemConfig},
 		{"audit", "审计日志", AuditView},

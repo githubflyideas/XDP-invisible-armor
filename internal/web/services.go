@@ -19,17 +19,28 @@ func (h *Handler) restoreQuota() {
 		Rules    int
 	}
 	h.db.Model(&model.ScopedBan{}).
-		Where("state IN ?", live).
+		Where("state IN ? AND global = ?", live, false).
 		Select("COALESCE(SUM(prefix_count),0) as prefixes, COUNT(*) as rules").
 		Scan(&agg)
 
 	var targets int64
 	h.db.Model(&model.ScopedBan{}).
-		Where("state IN ?", live).
+		Where("state IN ? AND global = ?", live, false).
 		Distinct("target_ip").
 		Count(&targets)
 
 	h.quota.SetBaseline(agg.Prefixes, agg.Rules, int(targets))
+
+	var globalAgg struct {
+		Prefixes int
+		Rules    int
+	}
+	h.db.Model(&model.ScopedBan{}).
+		Where("state IN ? AND global = ?", live, true).
+		Select("COALESCE(SUM(prefix_count),0) as prefixes, COUNT(*) as rules").
+		Scan(&globalAgg)
+
+	h.quota.SetGlobalBaseline(globalAgg.Prefixes, globalAgg.Rules)
 }
 
 func (h *Handler) guard() *safety.Guard {

@@ -21,6 +21,7 @@ const usersTpl = `<!doctype html><html><head><meta charset="utf-8"><title>用户
 
 <div class="card"><div class="hd">新增用户</div><div class="bd">
 <form method="post" action="/users">
+<input type="hidden" name="csrf_token" value="{{.csrf}}">
 <div class="newuser">
   <div><label>用户名</label><input name="username" required placeholder="zhangsan"></div>
   <div><label>邮箱(邮件审批用)</label><input name="email" type="email" placeholder="zhangsan@example.com"></div>
@@ -51,6 +52,7 @@ const usersTpl = `<!doctype html><html><head><meta charset="utf-8"><title>用户
 <td>{{if .Email}}{{.Email}}{{else}}<span style="color:#c3ccd9">—</span>{{end}}</td>
 <td>
   <form method="post" action="/users/{{.ID}}/role" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{$.csrf}}">
     <select name="role" onchange="this.form.submit()" style="width:auto;padding:4px 6px;font-size:13px">
       <option value="viewer"   {{if eq .Role "viewer"}}selected{{end}}>viewer</option>
       <option value="operator" {{if eq .Role "operator"}}selected{{end}}>operator</option>
@@ -64,15 +66,18 @@ const usersTpl = `<!doctype html><html><head><meta charset="utf-8"><title>用户
 <td>{{if .LastLoginAt}}{{.LastLoginAt.Format "01-02 15:04"}}{{else}}<span style="color:#c3ccd9">从未登录</span>{{end}}</td>
 <td class="act">
   <form method="post" action="/users/{{.ID}}/password">
+    <input type="hidden" name="csrf_token" value="{{$.csrf}}">
     <input class="pw-input" type="password" name="password" placeholder="新密码" minlength="8" required>
     <button class="btn">改密</button>
   </form>
   {{if ne .ID $.u.ID}}
     <form method="post" action="/users/{{.ID}}/toggle">
+      <input type="hidden" name="csrf_token" value="{{$.csrf}}">
       <button class="btn">{{if .Active}}停用{{else}}启用{{end}}</button>
     </form>
     <form method="post" action="/users/{{.ID}}/delete"
           onsubmit="return confirm('删除用户 {{.Username}}?该用户提交过的封禁记录会保留,但审计里将只剩用户 ID。')">
+      <input type="hidden" name="csrf_token" value="{{$.csrf}}">
       <button class="btn danger">删除</button>
     </form>
   {{end}}

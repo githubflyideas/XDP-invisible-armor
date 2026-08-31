@@ -38,7 +38,7 @@ func TestSessionStore_ConcurrentLoginAndAccess(t *testing.T) {
 	db := newAuthTestDB(t)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	Register(r, db)
+	Register(r, db, &fakeRevoker{})
 
 	var wg sync.WaitGroup
 
@@ -79,7 +79,7 @@ func TestSessionStore_LogoutRevokes(t *testing.T) {
 	db := newAuthTestDB(t)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	Register(r, db)
+	Register(r, db, &fakeRevoker{})
 
 	body := strings.NewReader("username=admin&password=admin12345")
 	req := httptest.NewRequest(http.MethodPost, "/login", body)

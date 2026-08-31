@@ -28,6 +28,7 @@ func (h *Handler) renderUsers(c *gin.Context, code int, errMsg, okMsg string) {
 		"online": h.sessions.OnlineUsers(),
 		"err":    errMsg,
 		"ok":     okMsg,
+		"csrf":   h.csrfTokenFor(c),
 	})
 }
 

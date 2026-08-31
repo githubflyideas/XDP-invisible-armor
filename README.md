@@ -105,6 +105,24 @@ Without it, everything else works and the UI tells you the feature is unavailabl
 | `XDPBAN_COOKIE_SECURE` | — | Set to any value when behind TLS |
 | `XDPBAN_PPROF` | — | Set to any value to expose `/debug/pprof` (bind to a private interface only) |
 
+## Deploy with systemd
+
+```bash
+sudo cp xdp-ban /usr/local/bin/xdp-ban
+sudo cp deploy/xdp-ban.service /etc/systemd/system/xdp-ban.service
+sudo mkdir -p /var/lib/xdp-ban /etc/xdp-ban
+echo 'XDPBAN_IFACE=eth0' | sudo tee /etc/xdp-ban/xdp-ban.env
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now xdp-ban
+```
+
+Edit `/etc/xdp-ban/xdp-ban.env` (or the `ExecStart` line in the unit file
+directly) to set the real production interface. `Restart=on-failure` restarts
+the process on a crash; `systemctl restart xdp-ban` for deploys sends
+`SIGTERM`, which triggers a graceful shutdown (drains in-flight HTTP requests,
+stops the executor loop, detaches XDP) before the process exits.
+
 ## Build from source
 
 Only needed if you're hacking on it — released binaries already bundle the eBPF objects.

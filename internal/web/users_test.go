@@ -83,7 +83,7 @@ func newUsersRouter(t *testing.T, db *gorm.DB) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	Register(r, db)
+	Register(r, db, &fakeRevoker{})
 	return r
 }
 

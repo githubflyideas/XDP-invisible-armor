@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -46,23 +49,43 @@ func main() {
 	loadPrefixDB()
 
 	bm, closeXDP := startExecutor(db, iface)
-	defer closeXDP()
-	go runExecutorLoop(db, bm, *pollInterval)
+	execCtx, cancelExec := context.WithCancel(context.Background())
+	go runExecutorLoop(execCtx, db, bm, *pollInterval)
+	go runReconcileLoop(execCtx, db, bm, 5*time.Minute)
 
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(gin.Logger())
-	web.Register(r, db)
+	web.Register(r, db, bm)
 
 	if web.PprofEnabled() {
 		web.RegisterPprof(r)
 		log.Printf("pprof 已启用: %s/debug/pprof/ (务必仅绑定内网)", addr)
 	}
 
-	log.Printf("xdp-ban listening on %s (db=%s, xdp iface=%s)", addr, dbPath, iface)
-	if err := r.Run(addr); err != nil {
-		log.Fatal(err)
+	srv := &http.Server{Addr: addr, Handler: r}
+	go func() {
+		log.Printf("xdp-ban listening on %s (db=%s, xdp iface=%s)", addr, dbPath, iface)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("http server: %v", err)
+		}
+	}()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	<-sig
+	log.Printf("收到停止信号,开始优雅关闭")
+
+	cancelExec()
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP 服务关闭异常: %v", err)
 	}
+
+	closeXDP()
+	log.Printf("已退出")
 }
 
 func env(k, def string) string {
@@ -129,5 +152,3 @@ func seed(db *gorm.DB) {
 	_ = policy.Roles
 	log.Println("seeded default accounts (change passwords!)")
 }
-
-var _ = http.StatusOK

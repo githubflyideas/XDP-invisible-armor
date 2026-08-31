@@ -19,6 +19,7 @@ func templates() *template.Template {
 	template.Must(t.New("login.html").Parse(loginTpl))
 	template.Must(t.New("dashboard.html").Parse(dashTpl))
 	template.Must(t.New("bans.html").Parse(bansTpl))
+	template.Must(t.New("lookup.html").Parse(lookupTpl))
 	template.Must(t.New("ban_new.html").Parse(banNewTpl))
 	template.Must(t.New("ban_detail.html").Parse(banDetailTpl))
 	template.Must(t.New("scoped_new.html").Parse(scopedNewTpl))
@@ -76,7 +77,8 @@ const dashTpl = `<!doctype html><html><head><meta charset="utf-8"><title>Dashboa
 <body>` + navTpl + `<h1>Dashboard</h1>
 <div class="stats"><div class="stat"><div class="n">{{.pending}}</div><div class="l">待审批</div></div>
 <div class="stat"><div class="n">{{.active}}</div><div class="l">生效中封禁</div></div>
-<div class="stat {{if .failed}}bad{{end}}"><div class="n">{{.failed}}</div><div class="l">下发失败</div></div></div>
+<div class="stat {{if .failed}}bad{{end}}"><div class="n">{{.failed}}</div><div class="l">下发失败</div></div>
+<div class="stat {{if .driftCount}}bad{{end}}"><div class="n">{{.driftCount}}</div><div class="l">近24h漂移告警</div></div></div>
 <div class="card" style="margin-top:16px"><div class="hd">快速操作</div><div class="bd">
 {{if .canCreate}}<a class="btn primary" href="/bans/new">新建封禁请求</a> {{end}}<a class="btn" href="/bans">查看全部请求</a>
 </div></div></main></div></body></html>`
@@ -89,8 +91,8 @@ const bansTpl = `<!doctype html><html><head><meta charset="utf-8"><title>封禁�
 <td><span class="st {{if eq .State "active"}}ok{{else if eq .State "pending"}}warn{{else}}mut{{end}}">{{.State}}</span></td>
 <td>{{.CreatedAt.Format "01-02 15:04"}}</td>
 <td>{{if and $.canApprove (eq .State "pending")}}
-<form method="post" action="/bans/{{.ID}}/approve" style="display:inline"><button class="btn primary">批准</button></form>
-<form method="post" action="/bans/{{.ID}}/reject" style="display:inline"><button class="btn danger">驳回</button></form>{{end}}</td></tr>
+<form method="post" action="/bans/{{.ID}}/approve" style="display:inline"><input type="hidden" name="csrf_token" value="{{$.csrf}}"><button class="btn primary">批准</button></form>
+<form method="post" action="/bans/{{.ID}}/reject" style="display:inline"><input type="hidden" name="csrf_token" value="{{$.csrf}}"><button class="btn danger">驳回</button></form>{{end}}</td></tr>
 {{end}}</tbody></table></div></main></div></body></html>`
 
 const banNewTpl = `<!doctype html><html><head><meta charset="utf-8"><title>新建 · xdp-ban</title>{{template "_head"}}</head>
@@ -98,7 +100,7 @@ const banNewTpl = `<!doctype html><html><head><meta charset="utf-8"><title>新�
 <div class="card" style="max-width:460px"><div class="bd">
 {{if .err}}<div class="flash err">{{.err}}</div>{{end}}
 {{if .target}}<div class="flash" style="background:#eef4ff;border:1px solid #c3d4f0;color:#1e3050">已根据采样流量预填,请核对后提交审批。</div>{{end}}
-<form method="post" action="/bans"><label>目标 IP / CIDR</label><input name="target" value="{{.target}}" placeholder="203.0.113.7 或 203.0.113.0/24" required>
+<form method="post" action="/bans"><input type="hidden" name="csrf_token" value="{{.csrf}}"><label>目标 IP / CIDR</label><input name="target" value="{{.target}}" placeholder="203.0.113.7 或 203.0.113.0/24" required>
 <label>原因</label><input name="reason" value="{{.reason}}" placeholder="ssh 爆破 / 恶意扫描" required>
 <div style="margin-top:18px"><button class="btn primary">提交请求</button> <a class="btn" href="/bans">取消</a></div></form>
 </div></div></main></div></body></html>`
@@ -114,8 +116,8 @@ const banDetailTpl = `<!doctype html><html><head><meta charset="utf-8"><title>�
 <tr><td style="font-weight:600">批准时间:</td><td>{{.req.UpdatedAt.Format "2006-01-02 15:04:05"}}</td></tr>{{end}}
 </table></div></div>
 {{if .canApprove}}<div class="card"><div class="bd">
-<form method="post" action="/bans/{{.req.ID}}/approve" style="display:inline"><button class="btn primary">批准</button></form>
-<form method="post" action="/bans/{{.req.ID}}/reject" style="display:inline"><button class="btn danger">驳回</button></form>
+<form method="post" action="/bans/{{.req.ID}}/approve" style="display:inline"><input type="hidden" name="csrf_token" value="{{.csrf}}"><button class="btn primary">批准</button></form>
+<form method="post" action="/bans/{{.req.ID}}/reject" style="display:inline"><input type="hidden" name="csrf_token" value="{{.csrf}}"><button class="btn danger">驳回</button></form>
 </div></div>{{end}}
 </main></div></body></html>`
 
@@ -146,3 +148,32 @@ const approveDoneTpl = `<!doctype html><html><head><meta charset="utf-8"><title>
 <body><div style="max-width:440px;margin:8vh auto"><div class="card"><div class="hd">✓ {{if eq .action "approve"}}已批准{{else}}已驳回{{end}}</div><div class="bd">
 <p>{{if eq .action "approve"}}封禁请求已批准并下发执行。{{else}}封禁请求已驳回。{{end}}</p>
 <p style="color:#98a2b3;font-size:12px;margin-top:14px">此链接已失效,不能再次使用。</p></div></div></div></body></html>`
+
+const lookupTpl = `<!doctype html><html><head><meta charset="utf-8"><title>IP 查询 · xdp-ban</title>{{template "_head"}}</head>
+<body>` + navTpl + `<h1>IP 查询</h1>
+<div class="card"><div class="bd">
+{{if .err}}<div class="flash err">{{.err}}</div>{{end}}
+<form method="post" action="/lookup"><input type="hidden" name="csrf_token" value="{{.csrf}}"><label>源 IP</label>
+<input name="ip" value="{{.query}}" placeholder="203.0.113.7" autofocus required>
+<div style="margin-top:14px"><button class="btn primary">查询</button></div></form>
+</div></div>
+{{if .searched}}<div class="card"><div class="hd">查询结果</div><div class="bd">
+{{if not .hits}}<p style="color:#67748a">未发现覆盖 {{.query}} 的封禁规则。</p>{{else}}
+<table><thead><tr><th>类型</th><th>目标/范围</th><th>状态</th><th>已生效</th><th>原因</th><th>请求人</th><th>批准人</th><th>过期时间</th><th></th></tr></thead><tbody>
+{{range .hits}}<tr>
+<td>{{if eq .Kind "ban"}}全局{{else}}范围{{end}}</td>
+<td class="mono">{{.Target}}</td>
+<td><span class="st {{if eq .State "active"}}ok{{else if eq .State "pending"}}warn{{else}}mut{{end}}">{{.State}}</span></td>
+<td>{{if .Enforced}}<span class="st ok">是</span>{{else}}<span class="st mut">否</span>{{end}}</td>
+<td>{{.Reason}}</td>
+<td>{{.RequestedBy}}</td>
+<td>{{.ApprovedBy}}</td>
+<td>{{.ExpiresAt}}</td>
+<td>{{if .CanRollback}}<form method="post" action="/lookup/{{.Kind}}/{{.ID}}/rollback" style="display:inline">
+<input type="hidden" name="csrf_token" value="{{$.csrf}}"><button class="btn danger">立即解封</button></form>{{end}}</td>
+</tr>{{end}}
+</tbody></table>
+<p style="color:#98a2b3;font-size:12px;margin-top:12px">若服务在此规则生效后重启过,底层规则可能已经丢失(定向封禁的目标映射不持久化)。</p>
+{{end}}
+</div></div>{{end}}
+</main></div></body></html>`

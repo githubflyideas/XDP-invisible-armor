@@ -23,9 +23,12 @@ const scopedNewTpl = `<!doctype html><html><head><meta charset="utf-8"><title>�
 {{else}}
 
 <div class="req-note">
-<strong>目标必须是单台主机(/32)。</strong>
+<strong>目标主机为单台(/32)时适用常规范围封禁。</strong>
 这不是界面偏好,而是 XDP 侧的结构约束:内核用 LPM_TRIE 对<em>源前缀</em>做最长匹配,
 若目标也带前缀就变成二维最长匹配,LPM_TRIE 表达不了,只能退化为每包遍历 —— 在 XDP 里不可接受。
+<br><br>
+<strong>不填目标主机则为全局 Geo/AS 封禁</strong>——直接写入全局封禁表,对所有受保护目标同时生效,
+请谨慎评估影响面。
 </div>
 
 {{if .err}}<div class="flash err">{{.err}}</div>{{end}}
@@ -46,9 +49,10 @@ const scopedNewTpl = `<!doctype html><html><head><meta charset="utf-8"><title>�
 </div></div>
 
 <form method="post" action="/scoped" id="scopedForm">
-<div class="card"><div class="hd">① 目标主机(必填,只能 /32)</div><div class="bd">
-<input name="target_ip" id="targetIP" placeholder="10.0.1.100" required>
-<div class="hint">要保护的服务器地址。范围封禁只对流向该主机的流量生效,不影响其他业务。</div>
+<input type="hidden" name="csrf_token" value="{{.csrf}}">
+<div class="card"><div class="hd">① 目标主机(留空 = 全局封禁,写入全局封禁表)</div><div class="bd">
+<input name="target_ip" id="targetIP" placeholder="10.0.1.100(留空则为全局封禁)">
+<div class="hint">填写时,范围封禁只对流向该主机的流量生效。留空时对所有受保护目标同时生效,请谨慎操作。</div>
 </div></div>
 
 <div class="card"><div class="hd">② 源地址范围(至少填一项;都填为交集)</div><div class="bd">
@@ -156,6 +160,9 @@ function preview(){
       + ' &nbsp;·&nbsp; 覆盖 '+d.address_count.toLocaleString()+' 个地址'
       + ' ('+d.address_share_pct.toFixed(4)+'% 的 IPv4 空间)</div>'
       + '<div style="margin-top:8px">'+esc(d.reason)+'</div>';
+    if (d.cloud_warning) {
+      html += '<div style="margin-top:8px;color:#a3271a">'+esc(d.cloud_warning)+'</div>';
+    }
     if (d.samples && d.samples.length) {
       html += '<div class="samples">前缀示例:'+d.samples.map(esc).join('  ')+' …</div>';
     }
@@ -196,7 +203,7 @@ const scopedListTpl = `<!doctype html><html><head><meta charset="utf-8"><title>�
 <th>目标主机</th><th>源范围</th><th>表项</th><th>覆盖地址</th><th>状态</th><th>提交时间</th><th></th>
 </tr></thead><tbody>
 {{range .bans}}<tr>
-<td class="mono">{{.TargetIP}}</td>
+<td class="mono">{{if .Global}}<span style="color:#a3271a">全局</span>{{else}}{{.TargetIP}}{{end}}</td>
 <td>{{if .Country}}<strong>{{.Country}}</strong>{{end}}{{if .ASN}} AS{{.ASN}}{{end}}
 {{if .OverrideAck}}<span style="color:#cf2f2f;font-size:10px;margin-left:6px">已确认大范围</span>{{end}}</td>
 <td>{{.PrefixCount}}</td>
@@ -205,10 +212,10 @@ const scopedListTpl = `<!doctype html><html><head><meta charset="utf-8"><title>�
 <td>{{.CreatedAt.Format "01-02 15:04"}}</td>
 <td>
 {{if and $.canApprove (eq .State "pending")}}
-<form method="post" action="/scoped/{{.ID}}/approve" style="display:inline"><button class="btn primary">批准</button></form>
-<form method="post" action="/scoped/{{.ID}}/reject" style="display:inline"><button class="btn danger">驳回</button></form>{{end}}
+<form method="post" action="/scoped/{{.ID}}/approve" style="display:inline"><input type="hidden" name="csrf_token" value="{{$.csrf}}"><button class="btn primary">批准</button></form>
+<form method="post" action="/scoped/{{.ID}}/reject" style="display:inline"><input type="hidden" name="csrf_token" value="{{$.csrf}}"><button class="btn danger">驳回</button></form>{{end}}
 {{if eq .State "active"}}
-<form method="post" action="/scoped/{{.ID}}/revoke" style="display:inline"><button class="btn danger">撤销</button></form>{{end}}
+<form method="post" action="/scoped/{{.ID}}/revoke" style="display:inline"><input type="hidden" name="csrf_token" value="{{$.csrf}}"><button class="btn danger">撤销</button></form>{{end}}
 </td></tr>
 {{else}}<tr><td colspan="7" style="color:#98a2b3">暂无范围封禁规则</td></tr>
 {{end}}</tbody></table></div>

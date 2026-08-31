@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -100,11 +101,37 @@ func startExecutor(db *gorm.DB, iface string) (*banMaps, func()) {
 	return bm, closeFn
 }
 
-func runExecutorLoop(db *gorm.DB, bm *banMaps, interval time.Duration) {
+func runExecutorLoop(ctx context.Context, db *gorm.DB, bm *banMaps, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for range ticker.C {
-		pollAndExecute(db, bm)
+	for {
+		select {
+		case <-ticker.C:
+			pollAndExecute(db, bm)
+		case <-ctx.Done():
+			log.Printf("执行器循环收到停止信号,退出")
+			return
+		}
+	}
+}
+
+// runReconcileLoop 是与执行轮询独立的、更粗粒度的回读核对循环——
+// 两者语义不同(一个是"有活干就干",一个是"定期抽查有没有跑偏"),
+// 故意不共用同一个 ticker,避免混淆。只记录 drift,不自动修复。
+func runReconcileLoop(ctx context.Context, db *gorm.DB, bm *banMaps, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			drifts := reconcile(db, bm)
+			for _, d := range drifts {
+				log.Printf("WARN reconcile: %s", d)
+			}
+		case <-ctx.Done():
+			log.Printf("回读核对循环收到停止信号,退出")
+			return
+		}
 	}
 }
 
