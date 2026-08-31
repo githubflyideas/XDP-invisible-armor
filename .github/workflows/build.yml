@@ -1,0 +1,62 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install clang/libbpf headers
+        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: CGO_ENABLED=1 go test -race ./...
+
+      - name: Build eBPF bytecode
+        run: make bpf
+
+      - name: Build linux/amd64 + linux/arm64 binaries
+        run: make dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xdp-ban-binaries
+          path: |
+            dist/xdp-ban-linux-amd64
+            dist/xdp-ban-linux-arm64
+            dist/SHA256SUMS
+
+  release:
+    needs: build-and-test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: xdp-ban-binaries
+          path: dist
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/xdp-ban-linux-amd64
+            dist/xdp-ban-linux-arm64
+            dist/SHA256SUMS
