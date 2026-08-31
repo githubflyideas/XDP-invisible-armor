@@ -20,14 +20,14 @@ jobs:
       - name: Install clang/libbpf headers
         run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev
 
+      - name: Build eBPF bytecode
+        run: make bpf
+
       - name: go vet
         run: go vet ./...
 
       - name: go test -race
         run: CGO_ENABLED=1 go test -race ./...
-
-      - name: Build eBPF bytecode
-        run: make bpf
 
       - name: Build linux/amd64 + linux/arm64 binaries
         run: make dist
