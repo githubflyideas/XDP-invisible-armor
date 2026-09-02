@@ -61,7 +61,7 @@ func Register(r *gin.Engine, db *gorm.DB, revoker Revoker) *Handler {
 	r.GET("/approve/:token", h.approveShow)
 	r.POST("/approve/:token", h.approveDo)
 
-	r.StaticFile("/favicon.ico", "favicon.ico")
+	r.GET("/favicon.ico", serveFavicon)
 
 	auth := r.Group("/", h.requireLogin, h.requireCSRF)
 	{

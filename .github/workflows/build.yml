@@ -23,6 +23,15 @@ jobs:
       - name: Build eBPF bytecode
         run: make bpf
 
+      - name: gofmt 检查
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未经 gofmt 格式化:"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: go vet
         run: go vet ./...
 

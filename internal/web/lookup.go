@@ -16,16 +16,16 @@ import (
 )
 
 type lookupHit struct {
-	Kind       string
-	ID         uint
-	Target     string
-	State      string
-	Reason     string
+	Kind        string
+	ID          uint
+	Target      string
+	State       string
+	Reason      string
 	RequestedBy string
 	ApprovedBy  string
-	CreatedAt  string
-	ExpiresAt  string
-	Enforced   bool
+	CreatedAt   string
+	ExpiresAt   string
+	Enforced    bool
 	CanRollback bool
 }
 

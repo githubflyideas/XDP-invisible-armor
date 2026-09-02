@@ -43,4 +43,3 @@ func (h *Handler) denySelfAction(c *gin.Context, actorID uint, actorLabel, entit
 		"self_approval_denied", "")
 	c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "不能对自己提交的请求执行此操作(四眼原则)"})
 }
-
