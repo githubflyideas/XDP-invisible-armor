@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="470" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+<defs><marker id="ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="#8b98ac"/></marker></defs>
+<rect width="760" height="470" fill="#eef1f5"/>
+<rect width="760" height="40" fill="#0f1b2d"/><text x="16" y="26" font-size="14" font-weight="700" fill="#fff">XDP<tspan fill="#d9411e">-ban</tspan></text>
+<text x="30" y="70" font-size="18" font-weight="600" fill="#1a2433">审批闸门 · Four-eyes &amp; 并发串行化</text>
+<text x="30" y="92" font-size="12" fill="#67748a">五个决策入口(4 个 Web + 1 个邮件 token)走同一把锁、同一组闸;四眼 = 审批人 ≠ 申请人</text>
+
+<!-- 两个入口 -->
+<rect x="56" y="110" width="290" height="50" rx="3" fill="#fff" stroke="#d5dae3"/>
+<text x="68" y="130" font-size="12" font-weight="600" fill="#1a2433">Web UI · 已登录 + CSRF</text>
+<text x="68" y="148" font-size="10" fill="#67748a">POST /bans/:id/{approve,reject} · /scoped/:id/{approve,reject}</text>
+<rect x="414" y="110" width="290" height="50" rx="3" fill="#fff" stroke="#d5dae3"/>
+<text x="426" y="130" font-size="12" font-weight="600" fill="#1a2433">邮件一次性链接 · 无会话</text>
+<text x="426" y="148" font-size="10" fill="#67748a">POST /approve/:token · 防伪来自 token 不可猜且一次性</text>
+
+<!-- 互斥闸 -->
+<rect x="56" y="186" width="380" height="40" rx="3" fill="#1e3050"/>
+<text x="68" y="211" font-size="12" font-weight="600" fill="#fff">decideMu.Lock() —— 进程内串行化</text>
+<text x="470" y="192" font-size="10" font-weight="600" fill="#1a2433">为什么不能只靠条件更新:</text>
+<text x="470" y="207" font-size="10" fill="#67748a">SQLite deferred 事务里先读后写,期间别人提交,</text>
+<text x="470" y="222" font-size="10" fill="#67748a">升级写锁直接返回 BUSY_SNAPSHOT —— 失败方拿到</text>
+<text x="470" y="237" font-size="10" fill="#67748a">的是 500,而不是我们想给的 409。busy_timeout 无用。</text>
+
+<!-- 事务三道闸 -->
+<rect x="56" y="248" width="380" height="150" rx="4" fill="#fff" stroke="#d5dae3"/>
+<rect x="56" y="248" width="380" height="28" rx="4" fill="#f7f9fc"/>
+<text x="68" y="267" font-size="11" font-weight="600" fill="#1a2433">db.Transaction —— 读 · 检查 · 写</text>
+<text x="68" y="300" font-size="11" fill="#1a2433">① selfActionDenied(actor, req.RequestedByID)</text>
+<text x="68" y="334" font-size="11" fill="#1a2433">② req.State == "pending"</text>
+<text x="68" y="362" font-size="11" fill="#1a2433">③ UPDATE … WHERE state='pending'</text>
+<text x="80" y="378" font-size="10" fill="#67748a">RowsAffected 必须为 1</text>
+
+<!-- 结果 -->
+<rect x="470" y="286" width="252" height="28" rx="3" fill="#fff" stroke="#e0b8b0"/><text x="482" y="305" font-size="11" fill="#cf2f2f">403 · 不能审批自己提交的请求</text>
+<rect x="470" y="320" width="252" height="28" rx="3" fill="#fff" stroke="#d5dae3"/><text x="482" y="339" font-size="11" fill="#d98a1e">409 · 该请求已处理</text>
+<rect x="470" y="354" width="252" height="28" rx="3" fill="#fff" stroke="#d5dae3"/><text x="482" y="373" font-size="11" fill="#d98a1e">409 · 条件更新未命中(纵深防御)</text>
+
+<g stroke="#8b98ac" stroke-width="1.4" fill="none" marker-end="url(#ar)">
+<path d="M201,160 L201,183"/>
+<path d="M559,160 L559,173 L300,173 L300,183"/>
+<path d="M246,226 L246,245"/>
+<path d="M436,300 L466,300"/>
+<path d="M436,334 L466,334"/>
+<path d="M436,368 L466,368"/>
+<path d="M246,398 L246,415"/>
+</g>
+
+<!-- 成功 -->
+<rect x="56" y="418" width="666" height="36" rx="3" fill="#fff" stroke="#d5dae3"/>
+<text x="68" y="435" font-size="11" font-weight="600" fill="#1a2433">三闸全过 → state=active · approved_by_id · effective_at · expires_at = now + TTL</text>
+<text x="68" y="449" font-size="10" fill="#67748a">→ 写 approved 审计 → CreateDispatch 入执行队列(黑白名单否决在这一步兜底,被否决返回 403)</text>
+</svg>

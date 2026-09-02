@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="470" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+<defs><marker id="ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="#8b98ac"/></marker></defs>
+<rect width="760" height="470" fill="#eef1f5"/>
+<rect width="760" height="40" fill="#0f1b2d"/><text x="16" y="26" font-size="14" font-weight="700" fill="#fff">XDP<tspan fill="#d9411e">-ban</tspan></text>
+<text x="30" y="70" font-size="18" font-weight="600" fill="#1a2433">数据面判定链 · XDP fast path</text>
+<text x="30" y="92" font-size="12" fill="#67748a">逐跳短路:不是被保护主机的流量,两次查表就放行,永不进协议栈</text>
+
+<g font-size="11">
+<rect x="56" y="112" width="340" height="44" rx="3" fill="#fff" stroke="#d5dae3"/><text x="68" y="130" font-weight="600" fill="#1a2433">① eth / iphdr 边界检查,h_proto 是 IPv4?</text><text x="68" y="147" font-size="10" fill="#67748a">verifier 要求的显式越界判断</text>
+<rect x="56" y="168" width="340" height="44" rx="3" fill="#fff" stroke="#d5dae3"/><text x="68" y="186" font-weight="600" fill="#1a2433">② src_ban_global 查 src_ip(prefixlen 32)</text><text x="68" y="203" font-size="10" fill="#67748a">全局黑名单:不问打谁,一律拦</text>
+<rect x="56" y="224" width="340" height="44" rx="3" fill="#fff" stroke="#d5dae3"/><text x="68" y="242" font-weight="600" fill="#1a2433">③ target_hosts[dst_ip] 在保护清单里?</text><text x="68" y="259" font-size="10" fill="#67748a">拿到 target_id,否则与本系统无关</text>
+<rect x="56" y="280" width="340" height="44" rx="3" fill="#fff" stroke="#d5dae3"/><text x="68" y="298" font-weight="600" fill="#1a2433">④ src_ban 查 (target_id, src_ip)</text><text x="68" y="315" font-size="10" fill="#67748a">prefixlen 64 · 只封"这个源打这个目标"</text>
+<rect x="56" y="336" width="340" height="44" rx="3" fill="#fff" stroke="#d5dae3"/><text x="68" y="354" font-weight="600" fill="#1a2433">⑤ expires_at vs bpf_ktime_get_ns()</text><text x="68" y="371" font-size="10" fill="#67748a">expires_at = 0 表示永久</text>
+<rect x="56" y="392" width="340" height="44" rx="3" fill="#2b1414" stroke="#cf2f2f"/><text x="68" y="410" font-weight="600" fill="#ff6b5b">hits++ · CNT_DROPPED · XDP_DROP</text><text x="68" y="427" font-size="10" fill="#cf9b96">命中计数写在 map 值里,供控制面回读</text>
+</g>
+
+<g font-size="11">
+<rect x="440" y="120" width="282" height="28" rx="3" fill="#fff" stroke="#d5dae3"/><text x="452" y="139" fill="#2f7d5f">否 → XDP_PASS(非 IPv4 / 截断包)</text>
+<rect x="440" y="176" width="282" height="28" rx="3" fill="#fff" stroke="#e0b8b0"/><text x="452" y="195" fill="#cf2f2f">命中且未过期 → CNT_DROPPED · XDP_DROP</text>
+<rect x="440" y="232" width="282" height="28" rx="3" fill="#fff" stroke="#d5dae3"/><text x="452" y="251" fill="#2f7d5f">否 → CNT_NOT_TARGET · XDP_PASS</text>
+<rect x="440" y="288" width="282" height="28" rx="3" fill="#fff" stroke="#d5dae3"/><text x="452" y="307" fill="#2f7d5f">无记录 → CNT_PASSED · XDP_PASS</text>
+<rect x="440" y="344" width="282" height="28" rx="3" fill="#fff" stroke="#d5dae3"/><text x="452" y="363" fill="#2f7d5f">已过期 → CNT_EXPIRED · XDP_PASS</text>
+</g>
+
+<g stroke="#8b98ac" stroke-width="1.4" fill="none" marker-end="url(#ar)">
+<path d="M120,156 L120,165"/>
+<path d="M120,212 L120,221"/>
+<path d="M120,268 L120,277"/>
+<path d="M120,324 L120,333"/>
+<path d="M120,380 L120,389"/>
+<path d="M396,134 L436,134"/>
+<path d="M396,190 L436,190"/>
+<path d="M396,246 L436,246"/>
+<path d="M396,302 L436,302"/>
+<path d="M396,358 L436,358"/>
+</g>
+<text x="30" y="459" font-size="10" fill="#67748a">counters 是 PERCPU_ARRAY,读的时候要按 CPU 求和。过期判定完全在内核完成:控制面不做 TTL 清扫,DB 与 map 的偏差靠 5 分钟一次的 reconcile 回读发现。</text>
+</svg>

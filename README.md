@@ -29,15 +29,37 @@ XDP-ban is a governed ban tool: submit a ban, get it approved by someone else, a
 
 One binary, control plane and enforcement together:
 
-```
-web UI / approvals ──▶ SQLite ──▶ (in-process) ──▶ xdp_filter.o ──eBPF map──▶ [eth0] production NIC
-```
+<div align="center">
+<img src="docs/img/arch.svg" width="100%"/>
+</div>
 
 `xdp-ban` used to be split into a control plane and a separate `xdp-agent`
 executor that polled the control plane's own HTTP API for orders. They've
 been merged: `xdp-ban` now loads and attaches the XDP filter program itself
 and executes approved bans directly against the database, no local HTTP
 round-trip. Pass `-iface <ifname>` so it knows where to attach.
+
+### The two paths that matter
+
+Approval is the only way a ban comes into existence, and the XDP fast path is
+the only place a ban has any effect. Both are worth reading closely:
+
+<div align="center">
+<img src="docs/img/approval.svg" width="49%"/> <img src="docs/img/packet-path.svg" width="49%"/>
+</div>
+
+On the left: all five decision entry points — four in the web UI, one via the
+one-time email token — funnel through a single in-process mutex before the
+transaction. The conditional `UPDATE ... WHERE state='pending'` stays as
+defence in depth, but on its own it hands the losing request a 500 rather than
+a 409, because SQLite fails the deferred transaction's write-lock upgrade with
+`SQLITE_BUSY_SNAPSHOT`.
+
+On the right: a packet destined for a host you never asked to protect is
+released after two map lookups. TTL expiry is decided in the kernel by
+comparing `expires_at` against `bpf_ktime_get_ns()` — there is no control-plane
+sweeper, and the DB↔map divergence that follows is what the 5-minute reconcile
+loop exists to detect.
 
 ## Quick start
 
