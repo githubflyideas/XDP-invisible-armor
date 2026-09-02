@@ -228,6 +228,10 @@ func (h *Handler) scopedBanList(c *gin.Context) {
 
 func (h *Handler) scopedBanApprove(c *gin.Context) {
 	u := h.currentUser(c)
+
+	h.decideMu.Lock()
+	defer h.decideMu.Unlock()
+
 	var sb model.ScopedBan
 	if h.db.First(&sb, c.Param("id")).Error != nil {
 		c.Redirect(http.StatusFound, "/scoped")
@@ -346,6 +350,10 @@ func (h *Handler) scopedBanApprove(c *gin.Context) {
 
 func (h *Handler) scopedBanReject(c *gin.Context) {
 	u := h.currentUser(c)
+
+	h.decideMu.Lock()
+	defer h.decideMu.Unlock()
+
 	var sb model.ScopedBan
 	if h.db.First(&sb, c.Param("id")).Error != nil {
 		c.Redirect(http.StatusFound, "/scoped")

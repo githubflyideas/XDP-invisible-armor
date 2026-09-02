@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,6 +27,15 @@ type Handler struct {
 	sessions  *sessionStore
 	quota     *quota.Tracker
 	revoker   Revoker
+
+	// decideMu 串行化所有"审批/驳回"的读-检查-写。
+	//
+	// 光靠 DB 层的 WHERE state='pending' 条件更新不够:SQLite 的
+	// deferred 事务里先读后写,若期间别的事务提交了,升级写锁会直接返回
+	// SQLITE_BUSY_SNAPSHOT——请求收到的是 500,而不是我们想给的 409。
+	// 单进程单库的部署形态下,进程内互斥是最省事也最确定的答案;
+	// 条件更新保留作纵深防御(执行器等其他进程仍可能并发改状态)。
+	decideMu sync.Mutex
 }
 
 const sessionTTL = 8 * time.Hour
@@ -248,6 +258,10 @@ func (h *Handler) banCreate(c *gin.Context) {
 
 func (h *Handler) banApprove(c *gin.Context) {
 	u := h.currentUser(c)
+
+	h.decideMu.Lock()
+	defer h.decideMu.Unlock()
+
 	var req model.BanRequest
 	if h.db.First(&req, c.Param("id")).Error != nil {
 		c.Redirect(http.StatusFound, "/bans")
@@ -321,6 +335,10 @@ func (h *Handler) banApprove(c *gin.Context) {
 
 func (h *Handler) banReject(c *gin.Context) {
 	u := h.currentUser(c)
+
+	h.decideMu.Lock()
+	defer h.decideMu.Unlock()
+
 	var req model.BanRequest
 	if h.db.First(&req, c.Param("id")).Error != nil {
 		c.Redirect(http.StatusFound, "/bans")
@@ -399,6 +417,9 @@ func (h *Handler) approveDo(c *gin.Context) {
 	var token model.ApprovalToken
 	var req model.BanRequest
 
+	h.decideMu.Lock()
+	defer h.decideMu.Unlock()
+
 	err := h.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("token = ? AND expires_at > ? AND used_at IS NULL",
 			c.Param("token"), now).First(&token).Error; err != nil {
@@ -411,7 +432,7 @@ func (h *Handler) approveDo(c *gin.Context) {
 			return errStateConflict
 		}
 
-		if req.RequestedByID != nil && *req.RequestedByID == token.ApproverID {
+		if selfActionDenied(token.ApproverID, req.RequestedByID) {
 			return errSelfApproval
 		}
 
