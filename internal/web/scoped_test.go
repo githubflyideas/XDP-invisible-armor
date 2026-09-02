@@ -99,7 +99,7 @@ func newScopedRouter(t *testing.T, db *gorm.DB, rv *fakeRevoker) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	Register(r, db, rv)
+	registerTestRouter(r, db, rv)
 	return r
 }
 

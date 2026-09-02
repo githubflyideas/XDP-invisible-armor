@@ -19,8 +19,8 @@ func TestBanApprove_ConcurrentApprovalsOnlyOneWins(t *testing.T) {
 	db.Exec("DELETE FROM ban_ladders")
 
 	requester := mkUser(t, db, "requester", "operator", true)
-	approver1 := mkUser(t, db, "approver1", "approver", true)
-	approver2 := mkUser(t, db, "approver2", "approver", true)
+	mkUser(t, db, "approver1", "approver", true)
+	mkUser(t, db, "approver2", "approver", true)
 
 	req := model.BanRequest{
 		ActionType: "ban", Target: "203.0.113.7", Source: "manual",
@@ -65,6 +65,4 @@ func TestBanApprove_ConcurrentApprovalsOnlyOneWins(t *testing.T) {
 	if n != 1 {
 		t.Errorf("approved 审计记录数 = %d, 期望恰好 1 条", n)
 	}
-
-	_ = approver2
 }

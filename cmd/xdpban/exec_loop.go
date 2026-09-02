@@ -88,9 +88,9 @@ func startExecutor(db *gorm.DB, iface string) (*banMaps, func()) {
 	log.Printf("✓ 系统启动于 %s,TTL 将换算为 ktime 基准", boot.Format(time.RFC3339))
 
 	bm := newBanMaps(
-		maps[banmap.MapGlobalBans],
-		maps[banmap.MapTargetHosts],
-		maps[banmap.MapSrcBans],
+		ebpfMap{maps[banmap.MapGlobalBans]},
+		ebpfMap{maps[banmap.MapTargetHosts]},
+		ebpfMap{maps[banmap.MapSrcBans]},
 		boot,
 	)
 

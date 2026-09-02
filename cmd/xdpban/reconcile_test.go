@@ -90,15 +90,14 @@ func TestReconcile_NoDriftWhenMapMatchesDB(t *testing.T) {
 
 func TestReconcile_ExpiredEntryIsNotFlaggedAsDrift(t *testing.T) {
 	db := newReconcileTestDB(t)
+	bm, _, _, _ := newTestMaps()
 
-	g := newFakeMap("global")
-	tg := newFakeMap("targets")
-	s := newFakeMap("src")
-	boot := time.Now().Add(-2 * time.Hour)
-	bm := newBanMaps(g, tg, s, boot)
-
+	// 两小时前下发、TTL 只有 60 秒 —— eBPF 侧早就自然过期了,
+	// map 里找不到是预期行为,不该报漂移。
+	ackedAt := time.Now().Add(-2 * time.Hour)
 	payload := mustPayload(t, BanPayload{Target: "203.0.113.7", TTLSecs: 60, BanID: "ban-1-203.0.113.7"})
-	d := model.Dispatch{BanRequestID: 1, BanID: "ban-1-203.0.113.7", Payload: payload, State: "acked"}
+	d := model.Dispatch{BanRequestID: 1, BanID: "ban-1-203.0.113.7", Payload: payload,
+		State: "acked", AckedAt: &ackedAt}
 	if err := db.Create(&d).Error; err != nil {
 		t.Fatalf("create dispatch: %v", err)
 	}
@@ -106,5 +105,23 @@ func TestReconcile_ExpiredEntryIsNotFlaggedAsDrift(t *testing.T) {
 	drifts := reconcile(db, bm)
 	if len(drifts) != 0 {
 		t.Errorf("已过期条目不应报 drift,实际 %v", drifts)
+	}
+}
+
+func TestReconcile_UnexpiredEntryMissingFromMapIsDrift(t *testing.T) {
+	db := newReconcileTestDB(t)
+	bm, _, _, _ := newTestMaps()
+
+	// 刚下发、TTL 一小时 —— 远未到期,map 里却找不到,这才是真漂移。
+	ackedAt := time.Now()
+	payload := mustPayload(t, BanPayload{Target: "203.0.113.8", TTLSecs: 3600, BanID: "ban-2-203.0.113.8"})
+	d := model.Dispatch{BanRequestID: 2, BanID: "ban-2-203.0.113.8", Payload: payload,
+		State: "acked", AckedAt: &ackedAt}
+	if err := db.Create(&d).Error; err != nil {
+		t.Fatalf("create dispatch: %v", err)
+	}
+
+	if drifts := reconcile(db, bm); len(drifts) != 1 {
+		t.Errorf("未到期却不在 map 里应报 1 条 drift,实际 %v", drifts)
 	}
 }

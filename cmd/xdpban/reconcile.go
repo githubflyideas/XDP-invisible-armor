@@ -54,10 +54,20 @@ func reconcile(db *gorm.DB, bm *banMaps) []string {
 			continue
 		}
 
-		deadline := banmap.KtimeDeadline(bm.bootTime, now, payload.TTLSecs)
-		if deadline != 0 {
-			expiresAt := bm.bootTime.Add(time.Duration(deadline))
-			if now.After(expiresAt) {
+		// TTL>0 的封禁由 eBPF 侧自然过期,到期后 map 里找不到是预期行为,不是漂移。
+		// 过期基准取 AckedAt(真正写进 map 的时刻),缺失时退回 CreatedAt。
+		//
+		// 注意:不能用 banmap.KtimeDeadline 反推——它算的是"从现在起 TTL 秒后到期",
+		// 每次调用都会把到期时刻推到未来,拿它做过期判断永远为假。
+		//
+		// 主机重启后 map 全空,此时未到期的 acked 记录会集中报漂移。这是有意的:
+		// 封禁没能跨重启存活,值得被看到。
+		if payload.TTLSecs > 0 {
+			appliedAt := d.CreatedAt
+			if d.AckedAt != nil {
+				appliedAt = *d.AckedAt
+			}
+			if now.After(appliedAt.Add(time.Duration(payload.TTLSecs) * time.Second)) {
 				continue
 			}
 		}

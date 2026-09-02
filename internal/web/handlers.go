@@ -30,7 +30,9 @@ type Handler struct {
 
 const sessionTTL = 8 * time.Hour
 
-func Register(r *gin.Engine, db *gorm.DB, revoker Revoker) {
+// Register 挂载全部路由,并返回构造出的 Handler。
+// 返回值给测试用(需要读会话里的 CSRF token),生产调用方直接忽略即可。
+func Register(r *gin.Engine, db *gorm.DB, revoker Revoker) *Handler {
 	baseURL := envOr("XDPBAN_BASE_URL", "http://localhost:8080")
 	h := &Handler{
 		db:        db,
@@ -93,6 +95,8 @@ func Register(r *gin.Engine, db *gorm.DB, revoker Revoker) {
 		auth.GET("/report", h.requireCap(policy.AuditView), h.reportPage)
 		auth.GET("/report/export", h.requireCap(policy.AuditView), h.reportExport)
 	}
+
+	return h
 }
 
 func (h *Handler) csrfTokenFor(c *gin.Context) string {

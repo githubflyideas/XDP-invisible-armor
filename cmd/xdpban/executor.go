@@ -18,11 +18,22 @@ type mapWriter interface {
 	Iterate() MapIterator
 }
 
-// MapIterator 的形状对齐 *ebpf.Map.Iterate() 真实返回的 *ebpf.MapIterator——
-// 生产类型零包装即可满足该接口,测试里用切片实现一个假的即可。
+// MapIterator 抽象掉 map 遍历,让 banMaps 不直接依赖 cilium/ebpf 的具体类型,
+// 测试里用切片实现一个假的即可。
 type MapIterator interface {
 	Next(keyOut, valueOut any) bool
 }
+
+// ebpfMap 把 *ebpf.Map 适配到 mapWriter。
+// 不能直接把 *ebpf.Map 当 mapWriter 用:它的 Iterate() 返回具体类型
+// *ebpf.MapIterator,而 Go 的接口满足不做返回值协变——即使
+// *ebpf.MapIterator 本身满足 MapIterator,方法签名也必须逐字一致。
+// Put/Delete 通过嵌入直接提升,只有 Iterate 需要转一层。
+type ebpfMap struct {
+	*ebpf.Map
+}
+
+func (m ebpfMap) Iterate() MapIterator { return m.Map.Iterate() }
 
 type banMaps struct {
 	globalBans  mapWriter

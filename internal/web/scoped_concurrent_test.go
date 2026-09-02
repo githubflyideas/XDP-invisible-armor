@@ -11,8 +11,8 @@ import (
 func TestScopedBanApprove_ConcurrentApprovalsOnlyOneWins(t *testing.T) {
 	db := newScopedTestDB(t)
 	requester := mkUser(t, db, "requester", "operator", true)
-	approver1 := mkUser(t, db, "approver1", "approver", true)
-	approver2 := mkUser(t, db, "approver2", "approver", true)
+	mkUser(t, db, "approver1", "approver", true)
+	mkUser(t, db, "approver2", "approver", true)
 
 	setTestPrefixDB(t, map[string][]string{"XX": {"198.51.100.0/24"}})
 
@@ -59,6 +59,4 @@ func TestScopedBanApprove_ConcurrentApprovalsOnlyOneWins(t *testing.T) {
 	if n != 1 {
 		t.Errorf("approved 审计记录数 = %d, 期望恰好 1 条", n)
 	}
-
-	_ = approver2
 }

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +15,26 @@ import (
 
 	"github.com/xdpban/xdp-ban/internal/model"
 )
+
+// testHandlers 记住每个测试路由对应的 Handler,好让 postAs 能从会话里取出
+// CSRF token 自动补上。测试关心的是被测路由本身的行为,不该每处都手写 token;
+// CSRF 中间件本身由 csrf_test.go 专门覆盖。
+var testHandlers sync.Map // *gin.Engine -> *Handler
+
+func registerTestRouter(r *gin.Engine, db *gorm.DB, rv Revoker) {
+	testHandlers.Store(r, Register(r, db, rv))
+}
+
+// csrfTokenForTest 取会话里的 CSRF token;取不到就返回空串,
+// 让请求照原样发出去(缺 token 的负例测试依赖这一点)。
+func csrfTokenForTest(r *gin.Engine, sid string) string {
+	v, ok := testHandlers.Load(r)
+	if !ok {
+		return ""
+	}
+	tok, _ := v.(*Handler).sessions.CSRFToken(sid)
+	return tok
+}
 
 func newUsersTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -62,7 +83,17 @@ func loginAs(t *testing.T, r *gin.Engine, username string) string {
 
 func postAs(t *testing.T, r *gin.Engine, sid, path string, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	// 复制一份再改,避免污染调用方传进来的 url.Values。
+	body := url.Values{}
+	for k, vs := range form {
+		body[k] = append([]string(nil), vs...)
+	}
+	if body.Get("csrf_token") == "" {
+		if tok := csrfTokenForTest(r, sid); tok != "" {
+			body.Set("csrf_token", tok)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(&http.Cookie{Name: "sid", Value: sid})
 	w := httptest.NewRecorder()
@@ -83,7 +114,7 @@ func newUsersRouter(t *testing.T, db *gorm.DB) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	Register(r, db, &fakeRevoker{})
+	registerTestRouter(r, db, &fakeRevoker{})
 	return r
 }
 
