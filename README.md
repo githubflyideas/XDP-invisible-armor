@@ -126,6 +126,7 @@ Without it, everything else works and the UI tells you the feature is unavailabl
 | `XDPBAN_PREFIX_DB` | — | Path to `ip2asn-v4.tsv[.gz]`; enables scoped bans |
 | `XDPBAN_COOKIE_SECURE` | — | Set to any value when behind TLS |
 | `XDPBAN_PPROF` | — | Set to any value to expose `/debug/pprof` (bind to a private interface only) |
+| `GIN_MODE` | `release` | Gin runs in release mode unless you set this. `GIN_MODE=debug` brings back the startup route dump — useful when a route isn't behaving, noisy otherwise. |
 
 ## Deploy with systemd
 

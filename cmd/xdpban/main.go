@@ -53,6 +53,15 @@ func main() {
 	go runExecutorLoop(execCtx, db, bm, *pollInterval)
 	go runReconcileLoop(execCtx, db, bm, 5*time.Minute)
 
+	// gin 不设模式就默认 debug:启动时把整张路由表连同 handler 的完全限定名
+	// 打一屏,再警告你切 release,每个请求还多走一层 debug 逻辑。生产不需要这些,
+	// 所以默认就按 release 跑;真要排障时显式 GIN_MODE=debug 拿回来。
+	// 只在环境变量为空时才覆盖 —— gin 自己在 init() 里就读了 GIN_MODE,
+	// 无条件 SetMode 会把用户显式指定的模式踩掉。
+	if os.Getenv("GIN_MODE") == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(gin.Logger())
