@@ -37,17 +37,16 @@ type Row struct {
 }
 
 type Summary struct {
-	From, To           time.Time
-	GeneratedAt        time.Time
-	GeneratedBy        string
-	TotalBans          int
-	Approved           int
-	Rejected           int
-	SafetyBlocked      int
-	SelfApprovalDenied int
-	OverrideCount      int
-	DistinctApprovers  int
-	DistinctTargets    int
+	From, To          time.Time
+	GeneratedAt       time.Time
+	GeneratedBy       string
+	TotalBans         int
+	Approved          int
+	Rejected          int
+	SafetyBlocked     int
+	OverrideCount     int
+	DistinctApprovers int
+	DistinctTargets   int
 }
 
 func Build(db *gorm.DB, f Filter, generatedBy string) (*Summary, []Row, error) {
@@ -140,12 +139,8 @@ func summarize(db *gorm.DB, f Filter, rows []Row, by string) *Summary {
 	s.DistinctApprovers = len(approvers)
 	s.DistinctTargets = len(targets)
 
-	var denied int64
-	db.Model(&model.AuditLog{}).
-		Where("occurred_at >= ? AND occurred_at <= ? AND event = ?",
-			f.From, f.To, "self_approval_denied").
-		Count(&denied)
-	s.SelfApprovalDenied = int(denied)
+	// 这里曾经统计 self_approval_denied 事件数(四眼原则拦截次数)。四眼已移除,
+	// 该事件不会再写入,留着只会在报告里挂一个恒为 0 的指标。历史记录仍在审计日志里可查。
 
 	return s
 }

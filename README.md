@@ -10,7 +10,7 @@ Governed XDP banning — in a single binary.
 
 ---
 
-XDP-ban is a governed ban tool: submit a ban, get it approved by someone else, and it executes in **XDP**, at the earliest point in the kernel, with escalating durations for attackers who keep knocking. Ships as a single static binary you can copy and run.
+XDP-ban is a governed ban tool: submit a ban, approve it as a deliberate second step, and it executes in **XDP**, at the earliest point in the kernel, with escalating durations for attackers who keep knocking. Ships as a single static binary you can copy and run.
 
 <div align="center">
 <img src="docs/img/dashboard.svg" width="49%"/> <img src="docs/img/bans.svg" width="49%"/>
@@ -19,7 +19,7 @@ XDP-ban is a governed ban tool: submit a ban, get it approved by someone else, a
 
 ## Features
 
-- **Governed** — approvals, four-eyes principle, role-based access, immutable audit log, one-time email approval links.
+- **Governed** — two-step approval, role-based access, immutable audit log, one-time email approval links. Built for one person: you can approve your own request.
 - **Escalating bans** — repeat offenders get progressively longer bans, up to permanent.
 - **Scoped bans** — pick source ranges by **country / ASN**, protect a single target host. Impact is previewed and quota-checked before submission.
 - **Pure XDP enforcement** — no nftables, no iptables. The agent writes eBPF maps directly, in **generic (SKB) mode** so it works on any NIC driver, not just the ones with native XDP support.
@@ -74,24 +74,24 @@ chmod +x xdp-ban
 sudo ./xdp-ban -iface eth0    # http://localhost:8080 — root needed to attach XDP
 ```
 
-### Default accounts
+### Default account
 
-Four accounts are seeded on first run, one per role. **Change these passwords
-immediately** — they are printed in this README and therefore public.
+One account is seeded on first run. **Change the password immediately** — it is
+printed in this README and therefore public.
 
-| Username | Password | Role | Can do |
-|---|---|---|---|
-| `admin` | `admin12345` | admin | everything, incl. user management and system config |
-| `approver` | `approver12345` | approver | approve / reject / revoke bans, view audit |
-| `operator` | `operator12345` | operator | submit ban requests, view audit |
-| `viewer` | `viewer12345` | viewer | read-only |
+| Username | Password | Role |
+|---|---|---|
+| `admin` | `admin12345` | admin — everything, incl. user management and system config |
 
-Why four and not one: the **four-eyes principle** requires the submitter and the
-approver to be different people. A single account cannot approve its own request,
-so you need at least two usable logins to complete a ban.
+One account is enough: submitting and approving can be the same person. The
+`pending → approve` step is still there, but it exists to give you one chance to
+change your mind and to let the audit log separate "when it was requested" from
+"when it took effect" — not to force a second pair of eyes.
 
-Change passwords under **Users** (admin only). You can also add, disable
-and delete users there — every change is written to the audit log.
+If you do share the tool, add accounts under **Users** (admin only) and pick a
+narrower role: `viewer` (read-only), `operator` (submit only), `approver`
+(approve / reject / revoke). You can also disable and delete users there —
+every change is written to the audit log.
 
 Data lives in a single `xdpban.db` file. Back up = copy the file.
 

@@ -1,92 +1,124 @@
 package web
 
 import (
-	"net/http"
 	"testing"
 
 	"github.com/xdpban/xdp-ban/internal/model"
 )
 
-// TestFourEyesInvariant_SelfActionDeniedOnMutatingRoutes 是一个表驱动不变量测试:
-// 每个会改变 BanRequest/ScopedBan 审批状态的路由,在请求人对自己提交的请求操作时都必须 403。
+// TestSelfActionAllowedOnMutatingRoutes 钉住的是四眼原则移除之后的不变量:
+// 同一个人提交、同一个人审批,必须走得通。这个测试以前钉的是反面(自我操作必须 403),
+// 现在反过来 —— 本项目定位是单人自用,提交人和审批人本来就是同一个人,
+// 强行要求两个账号只会逼出"建个小号点批准"这种把审计搞脏的用法。
 //
-// lookupRollback 和 scopedBanRevoke 故意不在此列——这是设计决定,不是遗漏:
-// 用户已确认撤销/回滚只需要 policy.UnbanExecute 权限门槛,不需要四眼互斥,
-// 因为撤销是安全阀,误撤销代价远低于误新增封禁,且审计日志已完整记录操作人。
-// 如果日后有人想把 lookupRollback/scopedBanRevoke 加进这个表,先去看这条注释和上层的设计决定。
-func TestFourEyesInvariant_SelfActionDeniedOnMutatingRoutes(t *testing.T) {
+// 断言看的是最终状态而不是 HTTP 状态码:scopedBanApprove 在状态改完之后还会展开前缀、
+// 校配额、下发 dispatch,这些环节自己就可能返回 403/409,拿状态码当断言会误报。
+// 状态在事务里就已经落库,所以"不再是 pending"精确对应"没被自我操作拦住"。
+//
+// 两步流程(提交 → pending → 批准)本身保留了:它仍然给一次改主意的机会,
+// 也让审计日志能分辨"什么时候申请"和"什么时候真正生效"。
+func TestSelfActionAllowedOnMutatingRoutes(t *testing.T) {
 	cases := []struct {
 		name string
-		run  func(t *testing.T) int
+		want string
+		run  func(t *testing.T) string
 	}{
 		{
-			name: "banApprove denies requester approving own request",
-			run: func(t *testing.T) int {
+			name: "banApprove lets the requester approve their own request",
+			want: "active",
+			run: func(t *testing.T) string {
 				db := newUsersTestDB(t)
 				if err := db.AutoMigrate(&model.BanRequest{}, &model.Dispatch{}, &model.ProtectedTarget{}, &model.BanLadder{}); err != nil {
 					t.Fatalf("migrate: %v", err)
 				}
 				db.Exec("DELETE FROM ban_requests")
-				u := mkUser(t, db, "self", "approver", true)
+				u := mkUser(t, db, "self", "admin", true)
 				req := model.BanRequest{ActionType: "ban", Target: "203.0.113.1", Source: "manual",
 					State: "pending", RequestedByID: &u.ID, ApprovalMode: "manual_dual"}
 				db.Create(&req)
 				r := newUsersRouter(t, db)
 				sid := loginAs(t, r, "self")
-				return postAs(t, r, sid, "/bans/"+itoa(req.ID)+"/approve", nil).Code
+				postAs(t, r, sid, "/bans/"+itoa(req.ID)+"/approve", nil)
+
+				var got model.BanRequest
+				if err := db.First(&got, req.ID).Error; err != nil {
+					t.Fatalf("reload ban request: %v", err)
+				}
+				return got.State
 			},
 		},
 		{
-			name: "banReject denies requester rejecting own request",
-			run: func(t *testing.T) int {
+			name: "banReject lets the requester reject their own request",
+			want: "rejected",
+			run: func(t *testing.T) string {
 				db := newUsersTestDB(t)
 				if err := db.AutoMigrate(&model.BanRequest{}, &model.Dispatch{}); err != nil {
 					t.Fatalf("migrate: %v", err)
 				}
 				db.Exec("DELETE FROM ban_requests")
-				u := mkUser(t, db, "self", "approver", true)
+				u := mkUser(t, db, "self", "admin", true)
 				req := model.BanRequest{ActionType: "ban", Target: "203.0.113.2", Source: "manual",
 					State: "pending", RequestedByID: &u.ID, ApprovalMode: "manual_dual"}
 				db.Create(&req)
 				r := newUsersRouter(t, db)
 				sid := loginAs(t, r, "self")
-				return postAs(t, r, sid, "/bans/"+itoa(req.ID)+"/reject", nil).Code
+				postAs(t, r, sid, "/bans/"+itoa(req.ID)+"/reject", nil)
+
+				var got model.BanRequest
+				if err := db.First(&got, req.ID).Error; err != nil {
+					t.Fatalf("reload ban request: %v", err)
+				}
+				return got.State
 			},
 		},
 		{
-			name: "scopedBanApprove denies requester approving own request",
-			run: func(t *testing.T) int {
+			name: "scopedBanApprove lets the requester approve their own request",
+			want: "active",
+			run: func(t *testing.T) string {
 				db := newScopedTestDB(t)
-				u := mkUser(t, db, "self", "approver", true)
+				u := mkUser(t, db, "self", "admin", true)
 				setTestPrefixDB(t, map[string][]string{"XX": {"198.51.100.0/24"}})
 				sb := model.ScopedBan{Global: true, Country: "XX", PrefixCount: 1, AddressCount: 256,
 					State: "pending", RequestedByID: &u.ID}
 				db.Create(&sb)
 				r := newScopedRouter(t, db, &fakeRevoker{})
 				sid := loginAs(t, r, "self")
-				return postAs(t, r, sid, "/scoped/"+itoa(sb.ID)+"/approve", nil).Code
+				postAs(t, r, sid, "/scoped/"+itoa(sb.ID)+"/approve", nil)
+
+				var got model.ScopedBan
+				if err := db.First(&got, sb.ID).Error; err != nil {
+					t.Fatalf("reload scoped ban: %v", err)
+				}
+				return got.State
 			},
 		},
 		{
-			name: "scopedBanReject denies requester rejecting own request",
-			run: func(t *testing.T) int {
+			name: "scopedBanReject lets the requester reject their own request",
+			want: "rejected",
+			run: func(t *testing.T) string {
 				db := newScopedTestDB(t)
-				u := mkUser(t, db, "self", "approver", true)
+				u := mkUser(t, db, "self", "admin", true)
 				setTestPrefixDB(t, map[string][]string{"XX": {"198.51.100.0/24"}})
 				sb := model.ScopedBan{Global: true, Country: "XX", PrefixCount: 1, AddressCount: 256,
 					State: "pending", RequestedByID: &u.ID}
 				db.Create(&sb)
 				r := newScopedRouter(t, db, &fakeRevoker{})
 				sid := loginAs(t, r, "self")
-				return postAs(t, r, sid, "/scoped/"+itoa(sb.ID)+"/reject", nil).Code
+				postAs(t, r, sid, "/scoped/"+itoa(sb.ID)+"/reject", nil)
+
+				var got model.ScopedBan
+				if err := db.First(&got, sb.ID).Error; err != nil {
+					t.Fatalf("reload scoped ban: %v", err)
+				}
+				return got.State
 			},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if code := tc.run(t); code != http.StatusForbidden {
-				t.Errorf("状态码 = %d, 期望 403(四眼原则应拒绝自我操作)", code)
+			if got := tc.run(t); got != tc.want {
+				t.Errorf("状态 = %q, 期望 %q(自我审批不应再被拦)", got, tc.want)
 			}
 		})
 	}

@@ -139,18 +139,14 @@ func seed(db *gorm.DB) {
 	if n > 0 {
 		return
 	}
-	accounts := []struct{ u, r, p string }{
-		{"admin", "admin", "admin12345"},
-		{"approver", "approver", "approver12345"},
-		{"operator", "operator", "operator12345"},
-		{"viewer", "viewer", "viewer12345"},
-	}
-	for _, a := range accounts {
-		u := &model.User{Username: a.u, Role: a.r, Active: true, AuthSource: "local",
-			Email: a.u + "@example.com"}
-		_ = u.SetPassword(a.p)
-		db.Create(u)
-	}
+	// 只播一个 admin。曾经这里播四个账号(admin/approver/operator/viewer),
+	// 是为了让四眼原则有两个可用登录;四眼已移除,多出来的三个账号就只是三组
+	// 写在 README 里的公开口令。角色矩阵(internal/policy)保留不动 ——
+	// admin 本来就持有全部能力,需要分权时在「用户管理」里加账号即可。
+	u := &model.User{Username: "admin", Role: "admin", Active: true, AuthSource: "local",
+		Email: "admin@example.com"}
+	_ = u.SetPassword("admin12345")
+	db.Create(u)
 	for _, p := range []struct{ t, l string }{
 		{"127.0.0.0/8", "环回(硬保护)"},
 		{"::1/128", "IPv6 环回"},
@@ -159,5 +155,5 @@ func seed(db *gorm.DB) {
 		db.Create(&model.ProtectedTarget{Target: p.t, Label: p.l, Active: true})
 	}
 	_ = policy.Roles
-	log.Println("seeded default accounts (change passwords!)")
+	log.Println("seeded default account admin/admin12345 (change the password!)")
 }

@@ -70,7 +70,7 @@ tr{page-break-inside:avoid}
 
 <div class="ctrl">
 <h3>控制措施执行情况</h3>
-<p>· <strong>四眼原则</strong>:提交人不得审批自己的请求。本区间内拦截 {{.sum.SelfApprovalDenied}} 次。</p>
+<p>· <strong>两步生效</strong>:封禁先落为 pending,再经一次显式批准才生效;申请时刻与生效时刻分别留痕。</p>
 <p>· <strong>保护集否决</strong>:关键地址不可被封禁,由独立于业务逻辑的安全层强制。本区间内否决 {{.sum.SafetyBlocked}} 次。</p>
 <p>· <strong>大范围二次确认</strong>:覆盖超过 25% IPv4 空间的封禁需操作人显式确认。本区间内确认 {{.sum.OverrideCount}} 次。</p>
 <p>· <strong>审计留痕</strong>:所有状态变更只增不改,应用层禁止 update/delete。</p>

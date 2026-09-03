@@ -4,19 +4,17 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"net/http"
 	"os"
 	"strconv"
-
-	"github.com/gin-gonic/gin"
-
-	"github.com/xdpban/xdp-ban/internal/model"
 )
 
-var (
-	errSelfApproval  = errors.New("self approval")
-	errStateConflict = errors.New("state conflict")
-)
+// 这里曾经还有一个 errSelfApproval,以及 selfActionDenied/denySelfAction 一对辅助函数,
+// 用来实现四眼原则(审批人 ≠ 申请人)。已按单人使用的定位移除:提交和审批本来就是同一个人,
+// 强行要求两个账号只会逼出"建个小号点批准"这种把审计搞脏的用法。
+//
+// 保留下来的是"提交 → pending → 批准"这个两步流程本身:它仍然给出一次改主意的机会,
+// 并且让审计日志能分辨"什么时候申请"和"什么时候真正生效"。
+var errStateConflict = errors.New("state conflict")
 
 func randToken() string {
 	b := make([]byte, 32)
@@ -31,15 +29,4 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
-}
-
-// selfActionDenied 判断 actor 是否试图对自己提交的请求执行需要四眼互斥的操作。
-func selfActionDenied(actorID uint, requestedByID *uint) bool {
-	return requestedByID != nil && *requestedByID == actorID
-}
-
-func (h *Handler) denySelfAction(c *gin.Context, actorID uint, actorLabel, entityType, entityID string) {
-	_ = model.WriteAudit(h.db, &actorID, actorLabel, entityType, entityID,
-		"self_approval_denied", "")
-	c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "不能对自己提交的请求执行此操作(四眼原则)"})
 }

@@ -237,10 +237,6 @@ func (h *Handler) scopedBanApprove(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/scoped")
 		return
 	}
-	if selfActionDenied(u.ID, sb.RequestedByID) {
-		h.denySelfAction(c, u.ID, u.Label(), "ScopedBan", itoa(sb.ID))
-		return
-	}
 	if sb.State != "pending" {
 		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理,当前状态:" + sb.State})
 		return
@@ -258,9 +254,6 @@ func (h *Handler) scopedBanApprove(c *gin.Context) {
 		if err := tx.First(&sb, sb.ID).Error; err != nil {
 			return err
 		}
-		if selfActionDenied(u.ID, sb.RequestedByID) {
-			return errSelfApproval
-		}
 		if sb.State != "pending" {
 			return errStateConflict
 		}
@@ -275,9 +268,6 @@ func (h *Handler) scopedBanApprove(c *gin.Context) {
 	})
 
 	switch {
-	case err == errSelfApproval:
-		h.denySelfAction(c, u.ID, u.Label(), "ScopedBan", itoa(sb.ID))
-		return
 	case err == errStateConflict:
 		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理,当前状态:" + sb.State})
 		return
@@ -357,10 +347,6 @@ func (h *Handler) scopedBanReject(c *gin.Context) {
 	var sb model.ScopedBan
 	if h.db.First(&sb, c.Param("id")).Error != nil {
 		c.Redirect(http.StatusFound, "/scoped")
-		return
-	}
-	if selfActionDenied(u.ID, sb.RequestedByID) {
-		h.denySelfAction(c, u.ID, u.Label(), "ScopedBan", itoa(sb.ID))
 		return
 	}
 	if sb.State != "pending" {

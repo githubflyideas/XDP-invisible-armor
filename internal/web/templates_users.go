@@ -38,8 +38,8 @@ const usersTpl = `<!doctype html><html><head><meta charset="utf-8"><title>用户
 </div>
 </form>
 <div style="color:#67748a;font-size:13px;margin-top:10px">
-四眼原则要求提交人与审批人不同,所以至少需要两个能操作的账号
-(一个 operator + 一个 approver,或两个 admin)。
+单人使用只需要一个 admin 账号:提交和审批可以是同一个人。
+多人协作时再按角色拆分 —— 角色决定能做什么,和审批流程无关。
 </div>
 </div></div>
 

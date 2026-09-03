@@ -268,10 +268,6 @@ func (h *Handler) banApprove(c *gin.Context) {
 		return
 	}
 
-	if selfActionDenied(u.ID, req.RequestedByID) {
-		h.denySelfAction(c, u.ID, u.Label(), "BanRequest", itoa(req.ID))
-		return
-	}
 	if req.State != "pending" {
 		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理,当前状态:" + req.State})
 		return
@@ -292,9 +288,6 @@ func (h *Handler) banApprove(c *gin.Context) {
 		if err := tx.First(&req, req.ID).Error; err != nil {
 			return err
 		}
-		if selfActionDenied(u.ID, req.RequestedByID) {
-			return errSelfApproval
-		}
 		if req.State != "pending" {
 			return errStateConflict
 		}
@@ -309,9 +302,6 @@ func (h *Handler) banApprove(c *gin.Context) {
 	})
 
 	switch {
-	case err == errSelfApproval:
-		h.denySelfAction(c, u.ID, u.Label(), "BanRequest", itoa(req.ID))
-		return
 	case err == errStateConflict:
 		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理,当前状态:" + req.State})
 		return
@@ -342,10 +332,6 @@ func (h *Handler) banReject(c *gin.Context) {
 	var req model.BanRequest
 	if h.db.First(&req, c.Param("id")).Error != nil {
 		c.Redirect(http.StatusFound, "/bans")
-		return
-	}
-	if selfActionDenied(u.ID, req.RequestedByID) {
-		h.denySelfAction(c, u.ID, u.Label(), "BanRequest", itoa(req.ID))
 		return
 	}
 	if req.State != "pending" {
@@ -432,10 +418,6 @@ func (h *Handler) approveDo(c *gin.Context) {
 			return errStateConflict
 		}
 
-		if selfActionDenied(token.ApproverID, req.RequestedByID) {
-			return errSelfApproval
-		}
-
 		if err := tx.Model(&token).Update("used_at", now).Error; err != nil {
 			return err
 		}
@@ -470,9 +452,6 @@ func (h *Handler) approveDo(c *gin.Context) {
 	})
 
 	switch {
-	case err == errSelfApproval:
-		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "不能审批自己提交的请求(四眼原则)"})
-		return
 	case err == errStateConflict:
 		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已被处理"})
 		return

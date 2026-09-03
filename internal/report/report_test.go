@@ -63,9 +63,6 @@ func seedReportData(t *testing.T, db *gorm.DB) (from, to time.Time) {
 		RequestedByID: &req.ID,
 	})
 
-	_ = model.WriteAudit(db, &req.ID, "user:alice", "BanRequest", "1",
-		"self_approval_denied", "")
-
 	return now.Add(-time.Hour), now.Add(time.Hour)
 }
 
@@ -103,9 +100,6 @@ func TestBuild_CoversBothBanKinds(t *testing.T) {
 
 	if sum.SafetyBlocked != 1 {
 		t.Errorf("保护集否决数 = %d, 期望 1", sum.SafetyBlocked)
-	}
-	if sum.SelfApprovalDenied != 1 {
-		t.Errorf("四眼拦截数 = %d, 期望 1", sum.SelfApprovalDenied)
 	}
 	if sum.OverrideCount != 1 {
 		t.Errorf("大范围确认数 = %d, 期望 1", sum.OverrideCount)
@@ -164,8 +158,8 @@ func TestWriteHTML_IncludesControlEvidence(t *testing.T) {
 	out := buf.String()
 
 	for _, must := range []string{
-		"四眼原则", "保护集否决", "大范围二次确认", "审计留痕",
-		"拦截 1 次", "否决 1 次", "确认 1 次",
+		"两步生效", "保护集否决", "大范围二次确认", "审计留痕",
+		"否决 1 次", "确认 1 次",
 	} {
 		if !strings.Contains(out, must) {
 			t.Errorf("HTML 报告缺少控制措施证据: %q", must)
